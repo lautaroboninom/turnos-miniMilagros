@@ -46,22 +46,8 @@ export default function Home() {
         </p>
       </div>
 
-      <div className="mb-16">
-        <h2 className="text-[18px] font-medium text-on-surface mb-4">Nuestros Trabajos</h2>
-        <div className="columns-2 gap-4 space-y-4">
-          {GALLERY_IMAGES.map((img) => (
-            <div key={img.id} className="relative rounded-[20px] overflow-hidden break-inside-avoid">
-              <img src={img.src} alt={img.alt} className="w-full object-cover rounded-[20px]" referrerPolicy="no-referrer" />
-              <div className="absolute inset-0 bg-gradient-to-t from-primary/60 to-transparent opacity-0 hover:opacity-100 transition-opacity flex items-end p-4">
-                 <span className="text-on-primary font-serif">{img.alt}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
       <div id="servicios">
-        <h2 className="text-[18px] font-medium text-on-surface mb-4">Seleccioná tu servicio</h2>
+        <h2 className="text-[18px] font-medium text-on-surface mb-4">Selecciona tu servicio</h2>
         {loading ? (
           <p className="text-on-surface-variant">Cargando servicios...</p>
         ) : (
@@ -87,6 +73,20 @@ export default function Home() {
             )}
           </div>
         )}
+      </div>
+
+      <div className="mt-16">
+        <h2 className="text-[18px] font-medium text-on-surface mb-4">Nuestros trabajos</h2>
+        <div className="columns-2 gap-4 space-y-4">
+          {GALLERY_IMAGES.map((img) => (
+            <div key={img.id} className="relative rounded-[20px] overflow-hidden break-inside-avoid">
+              <img src={img.src} alt={img.alt} className="w-full object-cover rounded-[20px]" referrerPolicy="no-referrer" />
+              <div className="absolute inset-0 bg-gradient-to-t from-primary/60 to-transparent opacity-0 hover:opacity-100 transition-opacity flex items-end p-4">
+                 <span className="text-on-primary font-serif">{img.alt}</span>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </Layout>
   );
