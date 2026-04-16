@@ -1,0 +1,119 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: services
+    // Document ID: string (e.g. valid random ID or name-based)
+    // Fields:
+    //   - name: string (required) - Name of service
+    //   - durationMinutes: number (required) - Service duration in minutes
+    //   - price: number (required) - Price in ARS
+    //   - isActive: bool (required) - Whether the service is currently offered
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: appointments
+    // Document ID: string
+    // Fields:
+    //   - serviceId: string (required)
+    //   - serviceName: string (required)
+    //   - durationMinutes: number (required)
+    //   - price: number (required)
+    //   - date: string (required) YYYY-MM-DD
+    //   - startTime: string (required) HH:mm
+    //   - endTime: string (required) HH:mm
+    //   - clientFirstName: string (required)
+    //   - clientLastName: string (required)
+    //   - status: string (required) ['pending', 'confirmed', 'cancelled']
+    //   - depositAmount: number (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: settings
+    // Document ID: 'global'
+    // Fields:
+    //   - depositAmount: number (required)
+    //   - updatedAt: timestamp (required)
+    // ===============================================================
+    
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Using user email from context as default admin
+    function isAdmin() {
+      return isAuthenticated() && (
+        (request.auth.token.email == "lautaroboninom@gmail.com" && request.auth.token.email_verified == true) ||
+        request.auth.token.email == "milagros@minimilagros.com"
+      );
+    }
+    
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+    
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidService(data) {
+      return hasOnlyAllowedFields(['name', 'durationMinutes', 'price', 'isActive', 'createdAt']) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        data.durationMinutes is number && data.durationMinutes > 0 &&
+        data.price is number && data.price >= 0 &&
+        data.isActive is bool; // createdAt might be server timestamp, usually handled natively
+    }
+
+    function isValidAppointment(data) {
+      return hasOnlyAllowedFields(['serviceId', 'serviceName', 'durationMinutes', 'price', 'date', 'startTime', 'endTime', 'clientFirstName', 'clientLastName', 'status', 'depositAmount', 'createdAt']) &&
+        data.serviceId is string && data.serviceId.size() > 0 &&
+        data.serviceName is string && data.serviceName.size() > 0 && data.serviceName.size() <= 100 &&
+        data.durationMinutes is number && data.durationMinutes > 0 &&
+        data.price is number && data.price >= 0 &&
+        data.date is string && data.date.size() == 10 &&
+        data.startTime is string && data.startTime.size() == 5 &&
+        data.endTime is string && data.endTime.size() == 5 &&
+        data.clientFirstName is string && data.clientFirstName.size() > 0 && data.clientFirstName.size() <= 50 &&
+        data.clientLastName is string && data.clientLastName.size() > 0 && data.clientLastName.size() <= 50 &&
+        data.status in ['pending', 'confirmed', 'cancelled'] &&
+        data.depositAmount is number && data.depositAmount >= 0;
+    }
+    
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    match /services/{serviceId} {
+      // Anyone can see active services
+      // Using simple read as public allows listing for the booking page
+      allow read: if true; 
+      allow create: if isAdmin() && isValidService(request.resource.data);
+      allow update: if isAdmin() && isValidService(request.resource.data);
+      allow delete: if isAdmin();
+    }
+    
+    match /appointments/{appointmentId} {
+      // Public can read to check availability (need to query by date/time)
+      // Public can only create appointments.
+      allow read: if true;
+      // Allow unauthenticated creation so users don't have to log in to book
+      allow create: if isValidAppointment(request.resource.data) && request.resource.data.status == 'pending';
+      // Admin can update/cancel/view all appointments
+      allow update: if isAdmin() && isValidAppointment(request.resource.data);
+      allow delete: if isAdmin();
+    }
+    
+    match /settings/{docId} {
+      // Public can read settings (e.g. to know deposit amount)
+      allow read: if docId == 'global';
+      allow write: if isAdmin() && docId == 'global' && 
+        hasOnlyAllowedFields(['depositAmount', 'updatedAt']) &&
+        request.resource.data.depositAmount is number && request.resource.data.depositAmount >= 0;
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "entities": {
+    "Service": {
+      "title": "Service",
+      "description": "A beauty service offered by MiniMilagros",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "durationMinutes": { "type": "number" },
+        "price": { "type": "number" },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "durationMinutes", "price", "isActive", "createdAt"]
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "A booked appointment by a client",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "serviceId": { "type": "string" },
+        "serviceName": { "type": "string" },
+        "durationMinutes": { "type": "number" },
+        "price": { "type": "number" },
+        "date": { "type": "string", "description": "YYYY-MM-DD" },
+        "startTime": { "type": "string", "description": "HH:mm" },
+        "endTime": { "type": "string", "description": "HH:mm" },
+        "clientFirstName": { "type": "string" },
+        "clientLastName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "confirmed", "cancelled"] },
+        "depositAmount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["serviceId", "serviceName", "durationMinutes", "price", "date", "startTime", "endTime", "clientFirstName", "clientLastName", "status", "depositAmount", "createdAt"]
+    },
+    "StudioSettings": {
+      "title": "StudioSettings",
+      "description": "Global settings for the studio",
+      "type": "object",
+      "properties": {
+        "depositAmount": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["depositAmount", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "services/{serviceId}": {
+      "schema": { "$ref": "#/entities/Service" },
+      "description": "Collection of all offered services"
+    },
+    "appointments/{appointmentId}": {
+      "schema": { "$ref": "#/entities/Appointment" },
+      "description": "Collection of booked appointments"
+    },
+    "settings/global": {
+      "schema": { "$ref": "#/entities/StudioSettings" },
+      "description": "Global studio settings"
+    }
+  }
+}

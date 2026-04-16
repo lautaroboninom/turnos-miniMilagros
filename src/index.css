@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: var(--bg-color);
+  --color-on-background: var(--text-main);
+  
+  --color-primary: var(--deep-red);
+  --color-on-primary: var(--white);
+  --color-primary-dim: var(--accent-pink);
+  
+  --color-primary-container: var(--primary-pink);
+  --color-on-primary-container: var(--deep-red);
+
+  --color-secondary-container: var(--white);
+  --color-on-secondary-container: var(--text-main);
+  
+  --color-error-container: #fce8e8;
+  --color-error: #dc2626;
+
+  --color-surface-bright: var(--white);
+  --color-on-surface: var(--text-main);
+  --color-on-surface-variant: var(--text-muted);
+  
+  --color-surface-container-highest: #F0E6E6;
+  --color-surface-container-lowest: var(--bg-color);
+  --color-surface-container-low: var(--white);
+  --color-surface-container: var(--white);
+  
+  --color-outline-variant: #F0E6E6;
+
+  --font-sans: var(--font-sans);
+  --font-serif: var(--font-serif);
+}
+
+@layer base {
+  :root {
+    --bg-color: #FAF6F6;
+    --primary-pink: #F8D7DA;
+    --accent-pink: #E8A0A0;
+    --deep-red: #8B4F4F;
+    --text-main: #4A4040;
+    --text-muted: #8C7E7E;
+    --white: #FFFFFF;
+    --font-serif: 'Georgia', serif;
+    --font-sans: 'Helvetica Neue', Arial, sans-serif;
+  }
+  
+  body {
+    @apply bg-background text-on-background font-sans;
+  }
+  
+  h1, h2, h3, h4, h5, h6, .font-headline {
+    @apply font-serif;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
