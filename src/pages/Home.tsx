@@ -1,30 +1,30 @@
 import { useEffect, useState } from 'react';
 import Layout from '../components/Layout';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { collection, onSnapshot, query } from 'firebase/firestore';
-import { Service } from '../types';
+import { collection, doc, onSnapshot, query } from 'firebase/firestore';
+import { GalleryImage, Service, StudioSettings } from '../types';
 import { useNavigate } from 'react-router-dom';
 
-const GALLERY_IMAGES = [
-  { id: 1, src: 'https://picsum.photos/seed/nails1/400/500', alt: 'Manicura' },
-  { id: 2, src: 'https://picsum.photos/seed/lashes1/400/400', alt: 'Pestañas' },
-  { id: 3, src: 'https://picsum.photos/seed/facial1/400/600', alt: 'Facial' },
-  { id: 4, src: 'https://picsum.photos/seed/spa1/400/400', alt: 'Spa' },
+const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
+  { src: 'https://picsum.photos/seed/nails1/400/500', alt: 'Manicura' },
+  { src: 'https://picsum.photos/seed/lashes1/400/400', alt: 'Pestanas' },
+  { src: 'https://picsum.photos/seed/facial1/400/600', alt: 'Facial' },
+  { src: 'https://picsum.photos/seed/spa1/400/400', alt: 'Spa' },
 ];
 
 export default function Home() {
   const [services, setServices] = useState<Service[]>([]);
+  const [galleryImages, setGalleryImages] = useState<GalleryImage[]>(DEFAULT_GALLERY_IMAGES);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
   useEffect(() => {
     const q = query(collection(db, 'services'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribeServices = onSnapshot(q, (snapshot) => {
       const svcs: Service[] = [];
-      snapshot.forEach((doc) => {
-        svcs.push({ id: doc.id, ...doc.data() } as Service);
+      snapshot.forEach((item) => {
+        svcs.push({ id: item.id, ...item.data() } as Service);
       });
-      // Show active first
       setServices(svcs.filter(s => s.isActive).sort((a, b) => a.name.localeCompare(b.name)));
       setLoading(false);
     }, (error) => {
@@ -32,7 +32,35 @@ export default function Home() {
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    const unsubscribeSettings = onSnapshot(doc(db, 'settings', 'global'), (snapshot) => {
+      if (!snapshot.exists()) {
+        setGalleryImages(DEFAULT_GALLERY_IMAGES);
+        return;
+      }
+
+      const data = snapshot.data() as StudioSettings;
+      if (!Array.isArray(data.galleryImages) || data.galleryImages.length === 0) {
+        setGalleryImages(DEFAULT_GALLERY_IMAGES);
+        return;
+      }
+
+      const sanitizedGallery = data.galleryImages
+        .filter((img): img is GalleryImage => typeof img?.src === 'string')
+        .map((img) => ({
+          src: img.src.trim(),
+          alt: typeof img.alt === 'string' && img.alt.trim() ? img.alt.trim() : 'Trabajo',
+        }))
+        .filter((img) => img.src.length > 0);
+
+      setGalleryImages(sanitizedGallery.length > 0 ? sanitizedGallery : DEFAULT_GALLERY_IMAGES);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'settings/global');
+    });
+
+    return () => {
+      unsubscribeServices();
+      unsubscribeSettings();
+    };
   }, []);
 
   return (
@@ -46,18 +74,18 @@ export default function Home() {
         </p>
       </div>
 
-      <div id="servicios">
-        <h2 className="text-[18px] font-medium text-on-surface mb-4">Selecciona tu servicio</h2>
+      <div id="servicios" className="mb-16">
+        <h2 className="text-[18px] font-medium text-on-surface mb-4">Seleccioná tu servicio</h2>
         {loading ? (
           <p className="text-on-surface-variant">Cargando servicios...</p>
         ) : (
           <div className="flex flex-col">
             {services.length === 0 ? (
-               <p className="text-on-surface-variant text-[14px] bg-white border border-outline-variant rounded-xl p-4 text-center">Próximamente agregaremos nuestros servicios.</p>
+              <p className="text-on-surface-variant text-[14px] bg-white border border-outline-variant rounded-xl p-4 text-center">Próximamente agregaremos nuestros servicios.</p>
             ) : (
               services.map((service) => (
-                <div 
-                  key={service.id} 
+                <div
+                  key={service.id}
                   className="bg-background border border-primary-container p-4 rounded-[16px] cursor-pointer hover:bg-primary-container hover:border-primary-dim transition-all group"
                   onClick={() => navigate(`/reservar/${service.id}`)}
                 >
@@ -75,14 +103,14 @@ export default function Home() {
         )}
       </div>
 
-      <div className="mt-16">
-        <h2 className="text-[18px] font-medium text-on-surface mb-4">Nuestros trabajos</h2>
+      <div className="mb-16">
+        <h2 className="text-[18px] font-medium text-on-surface mb-4">Nuestros Trabajos</h2>
         <div className="columns-2 gap-4 space-y-4">
-          {GALLERY_IMAGES.map((img) => (
-            <div key={img.id} className="relative rounded-[20px] overflow-hidden break-inside-avoid">
+          {galleryImages.map((img, index) => (
+            <div key={`${img.src}-${index}`} className="relative rounded-[20px] overflow-hidden break-inside-avoid">
               <img src={img.src} alt={img.alt} className="w-full object-cover rounded-[20px]" referrerPolicy="no-referrer" />
               <div className="absolute inset-0 bg-gradient-to-t from-primary/60 to-transparent opacity-0 hover:opacity-100 transition-opacity flex items-end p-4">
-                 <span className="text-on-primary font-serif">{img.alt}</span>
+                <span className="text-on-primary font-serif">{img.alt}</span>
               </div>
             </div>
           ))}

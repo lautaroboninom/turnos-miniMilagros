@@ -23,7 +23,13 @@ export interface Appointment {
   createdAt: string;
 }
 
+export interface GalleryImage {
+  src: string;
+  alt: string;
+}
+
 export interface StudioSettings {
   depositAmount: number;
   updatedAt: string;
+  galleryImages?: GalleryImage[];
 }

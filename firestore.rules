@@ -33,7 +33,8 @@ service cloud.firestore {
     // Document ID: 'global'
     // Fields:
     //   - depositAmount: number (required)
-    //   - updatedAt: timestamp (required)
+    //   - galleryImages: list (required) [{src, alt}]
+    //   - updatedAt: string (required)
     // ===============================================================
     
     // ===============================================================
@@ -84,6 +85,15 @@ service cloud.firestore {
         data.status in ['pending', 'confirmed', 'cancelled'] &&
         data.depositAmount is number && data.depositAmount >= 0;
     }
+
+    function isValidSettings(data) {
+      return data.keys().hasOnly(['depositAmount', 'galleryImages', 'updatedAt']) &&
+        data.depositAmount is number && data.depositAmount >= 0 &&
+        data.updatedAt is string &&
+        data.galleryImages is list &&
+        data.galleryImages.size() > 0 &&
+        data.galleryImages.size() <= 20;
+    }
     
     // ===============================================================
     // Rules
@@ -111,9 +121,7 @@ service cloud.firestore {
     match /settings/{docId} {
       // Public can read settings (e.g. to know deposit amount)
       allow read: if docId == 'global';
-      allow write: if isAdmin() && docId == 'global' && 
-        hasOnlyAllowedFields(['depositAmount', 'updatedAt']) &&
-        request.resource.data.depositAmount is number && request.resource.data.depositAmount >= 0;
+      allow write: if isAdmin() && docId == 'global' && isValidSettings(request.resource.data);
     }
   }
 }
