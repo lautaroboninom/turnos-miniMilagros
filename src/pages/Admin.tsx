@@ -27,8 +27,8 @@ type ServiceImageDraft = {
   file: File | null;
 };
 
-const MAX_SERVICE_IMAGE_SIZE = 5 * 1024 * 1024;
-const ALLOWED_SERVICE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 const toEditingService = (service?: Service): EditingService => ({
   ...(service || {}),
@@ -105,6 +105,7 @@ export default function Admin() {
   const [tab, setTab] = useState<'turnos' | 'servicios' | 'config'>('turnos');
   const [email, setEmail] = useState('milagros@minimilagros.com');
   const [password, setPassword] = useState('teamo210226');
+  const [uploadingGalleryIndex, setUploadingGalleryIndex] = useState<number | null>(null);
 
   useEffect(() => {
     const unsubAuth = auth.onAuthStateChanged(u => setUser(u));
@@ -227,12 +228,12 @@ export default function Admin() {
         return;
       }
 
-      if (!ALLOWED_SERVICE_IMAGE_TYPES.has(draft.file.type)) {
+      if (!ALLOWED_IMAGE_TYPES.has(draft.file.type)) {
         setServiceImageError(service.id, 'Subi una imagen JPG, PNG o WEBP.');
         return;
       }
 
-      if (draft.file.size > MAX_SERVICE_IMAGE_SIZE) {
+      if (draft.file.size > MAX_IMAGE_SIZE) {
         setServiceImageError(service.id, 'La imagen no puede superar 5 MB.');
         return;
       }
@@ -349,6 +350,71 @@ export default function Admin() {
     }
   };
 
+  const updateGalleryImage = (index: number, key: keyof GalleryImage, value: string) => {
+    setSettings((prev) => {
+      const currentGallery = [...(prev.galleryImages ?? [])];
+      if (!currentGallery[index]) return prev;
+      currentGallery[index] = { ...currentGallery[index], [key]: value };
+      return { ...prev, galleryImages: currentGallery };
+    });
+  };
+
+  const addGalleryImage = () => {
+    setSettings((prev) => {
+      const currentGallery = [...(prev.galleryImages ?? [])];
+      return { ...prev, galleryImages: [...currentGallery, { src: '', alt: '' }] };
+    });
+  };
+
+  const removeGalleryImage = (index: number) => {
+    if ((settings.galleryImages ?? []).length <= 1) {
+      alert('Debe quedar al menos una imagen.');
+      return;
+    }
+
+    setSettings((prev) => {
+      const currentGallery = [...(prev.galleryImages ?? [])];
+      currentGallery.splice(index, 1);
+      return { ...prev, galleryImages: currentGallery };
+    });
+  };
+
+  const uploadGalleryImage = async (index: number, file: File | null) => {
+    if (!file) return;
+
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      alert('Subi una imagen JPG, PNG o WEBP.');
+      return;
+    }
+
+    if (file.size > MAX_IMAGE_SIZE) {
+      alert('La imagen no puede superar 5 MB.');
+      return;
+    }
+
+    setUploadingGalleryIndex(index);
+
+    try {
+      const baseName = file.name.replace(/\.[^.]+$/, '') || `trabajo-${index + 1}`;
+      const storagePath = `gallery/${Date.now()}-${makeSafePathSegment(baseName)}.${getFileExtension(file)}`;
+      const storageRef = ref(storage, storagePath);
+      await uploadBytes(storageRef, file, { contentType: file.type });
+      const downloadUrl = await getDownloadURL(storageRef);
+
+      updateGalleryImage(index, 'src', downloadUrl);
+
+      const currentAlt = settings.galleryImages?.[index]?.alt?.trim() ?? '';
+      if (!currentAlt) {
+        updateGalleryImage(index, 'alt', baseName.trim() || `Trabajo ${index + 1}`);
+      }
+    } catch (e) {
+      console.error('Gallery upload error', e);
+      alert('No se pudo subir la imagen. Verifica Firebase Storage e intenta nuevamente.');
+    } finally {
+      setUploadingGalleryIndex(null);
+    }
+  };
+
   const actAppt = async (id: string, status: 'confirmed' | 'cancelled') => {
     try {
       await updateDoc(doc(db, 'appointments', id), { status });
@@ -450,11 +516,134 @@ export default function Admin() {
               onChange={e => setSettings({ ...settings, depositAmount: Number(e.target.value) })}
               className="w-full mb-4 bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3"
             />
-            <button onClick={saveSettings} className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium w-full sm:w-auto">Guardar Configuracion</button>
           </section>
 
           <section className="border-t border-outline-variant pt-8">
-            <h2 className="font-serif text-[18px] mb-4 text-primary">Imagenes por servicio</h2>
+            <div className="flex items-center justify-between mb-4 gap-4">
+              <div>
+                <h2 className="font-serif text-[18px] text-primary">Nuestros Trabajos</h2>
+                <p className="text-sm text-on-surface-variant mt-1">Las imagenes que cargues aca son las que se muestran en el inicio. Podes subir una foto o pegar un link.</p>
+              </div>
+              <button onClick={addGalleryImage} className="bg-secondary-container text-on-secondary-container py-2 px-4 rounded-lg text-sm font-medium shadow-sm whitespace-nowrap">
+                + Agregar Imagen
+              </button>
+            </div>
+            <div className="space-y-4">
+              {(settings.galleryImages ?? []).map((img, index) => (
+                <div key={index} className="border border-outline-variant rounded-xl p-4 bg-white">
+                  <div className="flex justify-between items-center mb-3 gap-4">
+                    <p className="text-sm font-medium text-primary">Imagen {index + 1}</p>
+                    <button onClick={() => removeGalleryImage(index)} className="text-xs bg-error-container text-error px-3 py-1 rounded-lg font-medium">
+                      Quitar
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {img.src ? (
+                      <img src={img.src} alt={img.alt || `Trabajo ${index + 1}`} className="w-full h-48 object-cover rounded-xl border border-outline-variant" referrerPolicy="no-referrer" />
+                    ) : (
+                      <div className="w-full h-48 rounded-xl border border-dashed border-outline-variant bg-surface-container flex items-center justify-center text-sm text-on-surface-variant">
+                        Sin imagen cargada
+                      </div>
+                    )}
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="block text-sm font-medium text-primary mb-2">Subir foto</span>
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          onChange={e => void uploadGalleryImage(index, e.target.files?.[0] ?? null)}
+                          className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface file:mr-3 file:border-0 file:bg-primary-container file:text-primary file:px-3 file:py-2 file:rounded-lg file:font-medium"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="block text-sm font-medium text-primary mb-2">O pegar link</span>
+                        <input
+                          type="url"
+                          value={img.src}
+                          onChange={e => updateGalleryImage(index, 'src', e.target.value)}
+                          className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface"
+                          placeholder="https://..."
+                        />
+                      </label>
+                    </div>
+                    {uploadingGalleryIndex === index && (
+                      <p className="text-sm text-on-surface-variant">Subiendo imagen...</p>
+                    )}
+                    <input
+                      type="text"
+                      value={img.alt}
+                      onChange={e => updateGalleryImage(index, 'alt', e.target.value)}
+                      className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface"
+                      placeholder="Texto alternativo (ej. Manicura)"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <button onClick={saveSettings} className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium w-full sm:w-auto">Guardar Configuracion</button>
+        </div>
+      )}
+
+      {tab === 'servicios' && (
+        <div>
+          <div className="flex gap-4 mb-6">
+            <button onClick={() => { setEditingService(toEditingService()); setServiceSaveError(''); }} className="bg-primary text-on-primary py-2 px-6 rounded-lg font-medium">
+              + Nuevo Servicio
+            </button>
+            {services.length === 0 && (
+              <button onClick={populateBaseData} className="bg-secondary-container text-on-secondary-container py-2 px-6 rounded-lg font-medium shadow-sm">
+                Cargar Catalogo Base
+              </button>
+            )}
+          </div>
+
+          {editingService && (
+            <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm mb-8">
+              <h3 className="font-serif text-[18px] mb-4 text-primary">{editingService.id ? 'Editar' : 'Crear'} Servicio</h3>
+              <div className="space-y-4 mb-4">
+                {serviceSaveError && (
+                  <div role="alert" className="rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
+                    {serviceSaveError}
+                  </div>
+                )}
+                <input type="text" placeholder="Nombre (ej. Esmaltado)" value={editingService.name || ''} onChange={e => { setEditingService({ ...editingService, name: e.target.value }); setServiceSaveError(''); }} className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                <div className="flex gap-4">
+                  <input type="text" inputMode="numeric" placeholder="Minutos (ej. 35)" value={editingService.durationMinutes || ''} onChange={e => { setEditingService({ ...editingService, durationMinutes: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                  <input type="text" inputMode="decimal" placeholder="Precio ($)" value={editingService.price || ''} onChange={e => { setEditingService({ ...editingService, price: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                </div>
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={editingService.isActive} onChange={e => setEditingService({ ...editingService, isActive: e.target.checked })} className="rounded text-primary focus:ring-primary" />
+                  <span className="text-sm">Activo (visible)</span>
+                </label>
+              </div>
+              <div className="flex gap-3">
+                <button onClick={saveService} disabled={savingService} className="bg-primary-dim text-white font-medium py-2 px-6 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed">
+                  {savingService ? 'Guardando...' : 'Guardar'}
+                </button>
+                <button onClick={() => { setEditingService(null); setServiceSaveError(''); }} className="bg-surface-container-highest text-on-surface font-medium py-2 px-6 rounded-xl">Cancelar</button>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-4">
+            {services.map(s => (
+              <div key={s.id} className="bg-background border border-primary-container p-4 rounded-[16px] flex justify-between items-center">
+                <div>
+                  <h4 className="font-sans font-medium text-[15px] text-primary mb-1">{s.name}</h4>
+                  <span className="text-[12px] text-on-surface-variant font-light">{s.durationMinutes} min • ${s.price.toLocaleString('es-AR')}</span>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => { setEditingService(toEditingService(s)); setServiceSaveError(''); }} className="p-2 text-primary-dim hover:text-primary transition-colors bg-primary-container rounded-lg"><span className="material-symbols-outlined text-[18px]">edit</span></button>
+                  <button onClick={() => deleteService(s.id)} className="p-2 text-error bg-error-container rounded-lg"><span className="material-symbols-outlined text-[18px]">delete</span></button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-8 bg-background border border-primary-container p-6 rounded-[16px] shadow-sm">
+            <h3 className="font-serif text-[18px] mb-4 text-primary">Imagenes por servicio</h3>
             {serviceImageNotice && (
               <div role="status" className="mb-4 rounded-xl border border-primary-container bg-primary-container px-4 py-3 text-sm text-primary">
                 {serviceImageNotice}
@@ -555,64 +744,6 @@ export default function Admin() {
                 })}
               </div>
             )}
-          </section>
-        </div>
-      )}
-
-      {tab === 'servicios' && (
-        <div>
-          <div className="flex gap-4 mb-6">
-            <button onClick={() => { setEditingService(toEditingService()); setServiceSaveError(''); }} className="bg-primary text-on-primary py-2 px-6 rounded-lg font-medium">
-              + Nuevo Servicio
-            </button>
-            {services.length === 0 && (
-              <button onClick={populateBaseData} className="bg-secondary-container text-on-secondary-container py-2 px-6 rounded-lg font-medium shadow-sm">
-                Cargar Catalogo Base
-              </button>
-            )}
-          </div>
-
-          {editingService && (
-            <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm mb-8">
-              <h3 className="font-serif text-[18px] mb-4 text-primary">{editingService.id ? 'Editar' : 'Crear'} Servicio</h3>
-              <div className="space-y-4 mb-4">
-                {serviceSaveError && (
-                  <div role="alert" className="rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
-                    {serviceSaveError}
-                  </div>
-                )}
-                <input type="text" placeholder="Nombre (ej. Esmaltado)" value={editingService.name || ''} onChange={e => { setEditingService({ ...editingService, name: e.target.value }); setServiceSaveError(''); }} className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3" />
-                <div className="flex gap-4">
-                  <input type="text" inputMode="numeric" placeholder="Minutos (ej. 35)" value={editingService.durationMinutes || ''} onChange={e => { setEditingService({ ...editingService, durationMinutes: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
-                  <input type="text" inputMode="decimal" placeholder="Precio ($)" value={editingService.price || ''} onChange={e => { setEditingService({ ...editingService, price: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
-                </div>
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={editingService.isActive} onChange={e => setEditingService({ ...editingService, isActive: e.target.checked })} className="rounded text-primary focus:ring-primary" />
-                  <span className="text-sm">Activo (visible)</span>
-                </label>
-              </div>
-              <div className="flex gap-3">
-                <button onClick={saveService} disabled={savingService} className="bg-primary-dim text-white font-medium py-2 px-6 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed">
-                  {savingService ? 'Guardando...' : 'Guardar'}
-                </button>
-                <button onClick={() => { setEditingService(null); setServiceSaveError(''); }} className="bg-surface-container-highest text-on-surface font-medium py-2 px-6 rounded-xl">Cancelar</button>
-              </div>
-            </div>
-          )}
-
-          <div className="space-y-4">
-            {services.map(s => (
-              <div key={s.id} className="bg-background border border-primary-container p-4 rounded-[16px] flex justify-between items-center">
-                <div>
-                  <h4 className="font-sans font-medium text-[15px] text-primary mb-1">{s.name}</h4>
-                  <span className="text-[12px] text-on-surface-variant font-light">{s.durationMinutes} min • ${s.price.toLocaleString('es-AR')}</span>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => { setEditingService(toEditingService(s)); setServiceSaveError(''); }} className="p-2 text-primary-dim hover:text-primary transition-colors bg-primary-container rounded-lg"><span className="material-symbols-outlined text-[18px]">edit</span></button>
-                  <button onClick={() => deleteService(s.id)} className="p-2 text-error bg-error-container rounded-lg"><span className="material-symbols-outlined text-[18px]">delete</span></button>
-                </div>
-              </div>
-            ))}
           </div>
         </div>
       )}
