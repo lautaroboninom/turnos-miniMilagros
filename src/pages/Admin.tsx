@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { db, auth, loginWithEmail, registerWithEmail, logout, handleFirestoreError, OperationType } from '../firebase';
@@ -12,6 +12,40 @@ const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
   { src: 'https://picsum.photos/seed/facial1/400/600', alt: 'Facial' },
   { src: 'https://picsum.photos/seed/spa1/400/400', alt: 'Spa' },
 ];
+
+type EditingService = Partial<Omit<Service, 'durationMinutes' | 'price'>> & {
+  durationMinutes?: string;
+  price?: string;
+};
+
+const toEditingService = (service?: Service): EditingService => ({
+  ...(service || {}),
+  durationMinutes: service?.durationMinutes != null ? String(service.durationMinutes) : '',
+  price: service?.price != null ? String(service.price) : '',
+  isActive: service?.isActive ?? true,
+});
+
+const parseLocalizedNumber = (value?: string) => {
+  const trimmed = (value || '').trim().replace(/\s+/g, '');
+  if (!trimmed) return null;
+
+  const lastComma = trimmed.lastIndexOf(',');
+  const lastDot = trimmed.lastIndexOf('.');
+  let normalized = trimmed;
+
+  if (lastComma >= 0 && lastDot >= 0) {
+    normalized = lastComma > lastDot
+      ? trimmed.replace(/\./g, '').replace(',', '.')
+      : trimmed.replace(/,/g, '');
+  } else if (lastComma >= 0) {
+    normalized = trimmed.replace(',', '.');
+  }
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const roundCurrency = (value: number) => Math.round(value * 100) / 100;
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -67,23 +101,60 @@ export default function Admin() {
     };
   }, [user]);
 
-  const [editingService, setEditingService] = useState<Partial<Service> | null>(null);
+  const [editingService, setEditingService] = useState<EditingService | null>(null);
+  const [savingService, setSavingService] = useState(false);
+  const [serviceSaveError, setServiceSaveError] = useState('');
 
   const saveService = async () => {
-    if (!editingService || !editingService.name || !editingService.durationMinutes || !editingService.price) return;
+    if (!editingService) return;
+
+    const name = (editingService.name || '').trim();
+    const durationMinutes = parseLocalizedNumber(editingService.durationMinutes);
+    const price = parseLocalizedNumber(editingService.price);
+
+    if (!name) {
+      setServiceSaveError('Completá el nombre del servicio.');
+      return;
+    }
+
+    if (durationMinutes === null || durationMinutes <= 0) {
+      setServiceSaveError('La duración debe ser un número mayor a 0.');
+      return;
+    }
+
+    if (price === null || price < 0) {
+      setServiceSaveError('El precio debe ser un número válido.');
+      return;
+    }
+
+    const serviceData = {
+      name,
+      durationMinutes: Math.round(durationMinutes),
+      price: roundCurrency(price),
+      isActive: editingService.isActive ?? true,
+    };
+
     try {
+      setSavingService(true);
+      setServiceSaveError('');
       if (editingService.id) {
-        await updateDoc(doc(db, 'services', editingService.id), { ...editingService });
+        await updateDoc(doc(db, 'services', editingService.id), serviceData);
       } else {
         await addDoc(collection(db, 'services'), {
-          ...editingService,
-          isActive: editingService.isActive ?? true,
+          ...serviceData,
           createdAt: new Date().toISOString(),
         });
       }
       setEditingService(null);
     } catch (e) {
-      handleFirestoreError(e, OperationType.WRITE, 'services');
+      setServiceSaveError('No se pudo guardar el servicio. Revisá permisos o conexión e intentá de nuevo.');
+      try {
+        handleFirestoreError(e, OperationType.WRITE, 'services');
+      } catch {
+        // Keep the admin panel open after logging the Firestore context.
+      }
+    } finally {
+      setSavingService(false);
     }
   };
 
@@ -169,7 +240,7 @@ export default function Admin() {
     alert('Servicios base cargados');
   };
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: FormEvent) => {
     e.preventDefault();
     if (!email || !password) return;
     try {
@@ -274,7 +345,7 @@ export default function Admin() {
       {tab === 'servicios' && (
         <div>
           <div className="flex gap-4 mb-6">
-            <button onClick={() => setEditingService({ isActive: true })} className="bg-primary text-on-primary py-2 px-6 rounded-lg font-medium">
+            <button onClick={() => { setEditingService(toEditingService()); setServiceSaveError(''); }} className="bg-primary text-on-primary py-2 px-6 rounded-lg font-medium">
               + Nuevo Servicio
             </button>
             {services.length === 0 && (
@@ -288,10 +359,15 @@ export default function Admin() {
             <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm mb-8">
               <h3 className="font-serif text-[18px] mb-4 text-primary">{editingService.id ? 'Editar' : 'Crear'} Servicio</h3>
               <div className="space-y-4 mb-4">
-                <input type="text" placeholder="Nombre (ej. Esmaltado)" value={editingService.name || ''} onChange={e => setEditingService({ ...editingService, name: e.target.value })} className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                {serviceSaveError && (
+                  <div role="alert" className="rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
+                    {serviceSaveError}
+                  </div>
+                )}
+                <input type="text" placeholder="Nombre (ej. Esmaltado)" value={editingService.name || ''} onChange={e => { setEditingService({ ...editingService, name: e.target.value }); setServiceSaveError(''); }} className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3" />
                 <div className="flex gap-4">
-                  <input type="number" placeholder="Minutos (ej. 35)" value={editingService.durationMinutes || ''} onChange={e => setEditingService({ ...editingService, durationMinutes: Number(e.target.value) })} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
-                  <input type="number" placeholder="Precio ($)" value={editingService.price || ''} onChange={e => setEditingService({ ...editingService, price: Number(e.target.value) })} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                  <input type="text" inputMode="numeric" placeholder="Minutos (ej. 35)" value={editingService.durationMinutes || ''} onChange={e => { setEditingService({ ...editingService, durationMinutes: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                  <input type="text" inputMode="decimal" placeholder="Precio ($)" value={editingService.price || ''} onChange={e => { setEditingService({ ...editingService, price: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
                 </div>
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={editingService.isActive} onChange={e => setEditingService({ ...editingService, isActive: e.target.checked })} className="rounded text-primary focus:ring-primary" />
@@ -299,8 +375,10 @@ export default function Admin() {
                 </label>
               </div>
               <div className="flex gap-3">
-                <button onClick={saveService} className="bg-primary-dim text-white font-medium py-2 px-6 rounded-xl">Guardar</button>
-                <button onClick={() => setEditingService(null)} className="bg-surface-container-highest text-on-surface font-medium py-2 px-6 rounded-xl">Cancelar</button>
+                <button onClick={saveService} disabled={savingService} className="bg-primary-dim text-white font-medium py-2 px-6 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed">
+                  {savingService ? 'Guardando...' : 'Guardar'}
+                </button>
+                <button onClick={() => { setEditingService(null); setServiceSaveError(''); }} className="bg-surface-container-highest text-on-surface font-medium py-2 px-6 rounded-xl">Cancelar</button>
               </div>
             </div>
           )}
@@ -313,7 +391,7 @@ export default function Admin() {
                   <span className="text-[12px] text-on-surface-variant font-light">{s.durationMinutes} min • ${s.price.toLocaleString('es-AR')}</span>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => setEditingService(s)} className="p-2 text-primary-dim hover:text-primary transition-colors bg-primary-container rounded-lg"><span className="material-symbols-outlined text-[18px]">edit</span></button>
+                  <button onClick={() => { setEditingService(toEditingService(s)); setServiceSaveError(''); }} className="p-2 text-primary-dim hover:text-primary transition-colors bg-primary-container rounded-lg"><span className="material-symbols-outlined text-[18px]">edit</span></button>
                   <button onClick={() => deleteService(s.id)} className="p-2 text-error bg-error-container rounded-lg"><span className="material-symbols-outlined text-[18px]">delete</span></button>
                 </div>
               </div>
