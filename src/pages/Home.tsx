@@ -63,6 +63,14 @@ export default function Home() {
     };
   }, []);
 
+  const serviceGalleryImages = services
+    .filter((service) => typeof service.imageUrl === 'string' && service.imageUrl.trim().length > 0)
+    .map((service) => ({
+      src: service.imageUrl!.trim(),
+      alt: service.name,
+    }));
+  const displayedGalleryImages = serviceGalleryImages.length > 0 ? serviceGalleryImages : galleryImages;
+
   return (
     <Layout>
       <div className="text-center mb-12 relative z-10 px-4">
@@ -89,12 +97,17 @@ export default function Home() {
                   className="bg-background border border-primary-container p-4 rounded-[16px] cursor-pointer hover:bg-primary-container hover:border-primary-dim transition-all group"
                   onClick={() => navigate(`/reservar/${service.id}`)}
                 >
-                  <div className="flex justify-between items-center">
-                    <div>
+                  <div className="flex items-center gap-4">
+                    {service.imageUrl && (
+                      <div className="h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-outline-variant bg-surface-container-highest">
+                        <img src={service.imageUrl} alt={service.name} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
                       <h3 className="font-sans text-[15px] font-medium text-primary mb-1">{service.name}</h3>
                       <span className="text-[12px] text-on-surface-variant">{service.durationMinutes} min • Servicio</span>
                     </div>
-                    <span className="text-[14px] font-bold text-primary">${service.price.toLocaleString('es-AR')}</span>
+                    <span className="shrink-0 text-[14px] font-bold text-primary">${service.price.toLocaleString('es-AR')}</span>
                   </div>
                 </div>
               ))
@@ -106,7 +119,7 @@ export default function Home() {
       <div className="mb-16">
         <h2 className="text-[18px] font-medium text-on-surface mb-4">Nuestros Trabajos</h2>
         <div className="columns-2 gap-4 space-y-4">
-          {galleryImages.map((img, index) => (
+          {displayedGalleryImages.map((img, index) => (
             <div key={`${img.src}-${index}`} className="relative rounded-[20px] overflow-hidden break-inside-avoid">
               <img src={img.src} alt={img.alt} className="w-full object-cover rounded-[20px]" referrerPolicy="no-referrer" />
               <div className="absolute inset-0 bg-gradient-to-t from-primary/60 to-transparent opacity-0 hover:opacity-100 transition-opacity flex items-end p-4">
