@@ -5,6 +5,10 @@ export interface Service {
   price: number;
   isActive: boolean;
   createdAt: string;
+  imageUrl?: string;
+  imageSourceType?: 'url' | 'upload';
+  imageStoragePath?: string;
+  imageUpdatedAt?: string;
 }
 
 export interface Appointment {
