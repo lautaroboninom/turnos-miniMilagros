@@ -63,6 +63,14 @@ export default function Home() {
     };
   }, []);
 
+  const serviceGalleryImages = services
+    .filter((service) => typeof service.imageUrl === 'string' && service.imageUrl.trim().length > 0)
+    .map((service) => ({
+      src: service.imageUrl!.trim(),
+      alt: service.name,
+    }));
+  const displayedGalleryImages = serviceGalleryImages.length > 0 ? serviceGalleryImages : galleryImages;
+
   return (
     <Layout>
       <div className="text-center mb-12 relative z-10 px-4">
@@ -111,7 +119,7 @@ export default function Home() {
       <div className="mb-16">
         <h2 className="text-[18px] font-medium text-on-surface mb-4">Nuestros Trabajos</h2>
         <div className="columns-2 gap-4 space-y-4">
-          {galleryImages.map((img, index) => (
+          {displayedGalleryImages.map((img, index) => (
             <div key={`${img.src}-${index}`} className="relative rounded-[20px] overflow-hidden break-inside-avoid">
               <img src={img.src} alt={img.alt} className="w-full object-cover rounded-[20px]" referrerPolicy="no-referrer" />
               <div className="absolute inset-0 bg-gradient-to-t from-primary/60 to-transparent opacity-0 hover:opacity-100 transition-opacity flex items-end p-4">

@@ -1,15 +1,19 @@
 import { ReactNode } from 'react';
-import { Menu } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 export default function Layout({ children }: { children: ReactNode }) {
   return (
-    <div className="bg-background text-on-surface min-h-screen flex flex-col pb-24 md:pb-0 font-sans relative overflow-x-hidden">
-      <div className="absolute z-[-1] top-[10%] left-[5%] font-serif text-[100px] md:text-[120px] opacity-5 text-primary pointer-events-none -rotate-12">
-        MiniMilagros
+    <div className="bg-background text-on-surface min-h-screen flex flex-col pb-24 md:pb-0 font-sans relative isolate overflow-x-hidden">
+      <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
+        <img
+          src="/mini-milagros-watermark.webp"
+          alt=""
+          aria-hidden="true"
+          className="absolute left-1/2 top-1/2 w-[min(92vw,620px)] max-w-none -translate-x-1/2 -translate-y-1/2 opacity-[0.085] md:w-[720px]"
+        />
       </div>
       
-      <header className="pt-10 px-6 pb-5 text-center relative max-w-[500px] mx-auto w-full">
+      <header className="pt-10 px-6 pb-5 text-center relative z-10 max-w-[500px] mx-auto w-full">
         <div className="font-serif italic text-[28px] text-primary mb-1">
           MiniMilagros
         </div>
@@ -22,7 +26,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         </Link>
       </header>
 
-      <main className="flex-grow max-w-[500px] mx-auto w-full px-6 pt-2 pb-24">
+      <main className="relative z-10 flex-grow max-w-[500px] mx-auto w-full px-6 pt-2 pb-24">
         {children}
       </main>
 
