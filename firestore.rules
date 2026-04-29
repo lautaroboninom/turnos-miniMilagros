@@ -12,6 +12,10 @@ service cloud.firestore {
     //   - price: number (required) - Price in ARS
     //   - isActive: bool (required) - Whether the service is currently offered
     //   - createdAt: timestamp (required)
+    //   - imageUrl: string (optional) - Public image URL
+    //   - imageSourceType: string (optional) ['url', 'upload']
+    //   - imageStoragePath: string (optional) - Firebase Storage path
+    //   - imageUpdatedAt: string (optional)
     //
     // Collection: appointments
     // Document ID: string
@@ -64,11 +68,15 @@ service cloud.firestore {
     // Domain Validators
     // ===============================================================
     function isValidService(data) {
-      return hasOnlyAllowedFields(['name', 'durationMinutes', 'price', 'isActive', 'createdAt']) &&
+      return hasOnlyAllowedFields(['name', 'durationMinutes', 'price', 'isActive', 'createdAt', 'imageUrl', 'imageSourceType', 'imageStoragePath', 'imageUpdatedAt']) &&
         data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
         data.durationMinutes is number && data.durationMinutes > 0 &&
         data.price is number && data.price >= 0 &&
-        data.isActive is bool; // createdAt might be server timestamp, usually handled natively
+        data.isActive is bool &&
+        (!data.keys().hasAny(['imageUrl']) || (data.imageUrl is string && data.imageUrl.size() <= 2000)) &&
+        (!data.keys().hasAny(['imageSourceType']) || data.imageSourceType in ['url', 'upload']) &&
+        (!data.keys().hasAny(['imageStoragePath']) || (data.imageStoragePath is string && data.imageStoragePath.size() <= 300)) &&
+        (!data.keys().hasAny(['imageUpdatedAt']) || data.imageUpdatedAt is string); // createdAt might be server timestamp, usually handled natively
     }
 
     function isValidAppointment(data) {
