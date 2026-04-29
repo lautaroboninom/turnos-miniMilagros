@@ -9,7 +9,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           src="/mini-milagros-watermark.webp"
           alt=""
           aria-hidden="true"
-          className="absolute left-1/2 top-1/2 w-[min(92vw,620px)] max-w-none -translate-x-1/2 -translate-y-1/2 opacity-[0.085] md:w-[720px]"
+          className="absolute left-1/2 top-1/2 w-[min(92vw,620px)] max-w-none -translate-x-1/2 -translate-y-1/2 opacity-[0.18] md:w-[720px]"
         />
       </div>
       
