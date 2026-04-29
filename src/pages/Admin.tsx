@@ -1,8 +1,9 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
-import { db, auth, loginWithEmail, registerWithEmail, logout, handleFirestoreError, OperationType } from '../firebase';
+import { db, auth, storage, loginWithEmail, registerWithEmail, logout, handleFirestoreError, OperationType } from '../firebase';
 import { collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
+import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import { Service, Appointment, GalleryImage, StudioSettings } from '../types';
 import { format } from 'date-fns';
 
@@ -17,6 +18,17 @@ type EditingService = Partial<Omit<Service, 'durationMinutes' | 'price'>> & {
   durationMinutes?: string;
   price?: string;
 };
+
+type ImageInputMode = 'url' | 'upload';
+
+type ServiceImageDraft = {
+  mode: ImageInputMode;
+  url: string;
+  file: File | null;
+};
+
+const MAX_SERVICE_IMAGE_SIZE = 5 * 1024 * 1024;
+const ALLOWED_SERVICE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 const toEditingService = (service?: Service): EditingService => ({
   ...(service || {}),
@@ -46,6 +58,39 @@ const parseLocalizedNumber = (value?: string) => {
 };
 
 const roundCurrency = (value: number) => Math.round(value * 100) / 100;
+
+const getInitialImageDraft = (service: Service): ServiceImageDraft => ({
+  mode: service.imageSourceType === 'upload' ? 'upload' : 'url',
+  url: service.imageUrl || '',
+  file: null,
+});
+
+const isValidHttpUrl = (value: string) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+const getFileExtension = (file: File) => {
+  const fromName = file.name.split('.').pop()?.toLowerCase();
+  if (fromName && ['jpg', 'jpeg', 'png', 'webp'].includes(fromName)) return fromName;
+  if (file.type === 'image/png') return 'png';
+  if (file.type === 'image/webp') return 'webp';
+  return 'jpg';
+};
+
+const makeSafePathSegment = (value: string) => (
+  value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'servicio'
+);
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -104,6 +149,124 @@ export default function Admin() {
   const [editingService, setEditingService] = useState<EditingService | null>(null);
   const [savingService, setSavingService] = useState(false);
   const [serviceSaveError, setServiceSaveError] = useState('');
+  const [serviceImageDrafts, setServiceImageDrafts] = useState<Record<string, ServiceImageDraft>>({});
+  const [savingImageFor, setSavingImageFor] = useState<string | null>(null);
+  const [serviceImageErrors, setServiceImageErrors] = useState<Record<string, string>>({});
+  const [serviceImageNotice, setServiceImageNotice] = useState('');
+
+  useEffect(() => {
+    setServiceImageDrafts((current) => {
+      const next = { ...current };
+      const serviceIds = new Set(services.map((service) => service.id));
+
+      services.forEach((service) => {
+        if (!next[service.id]) {
+          next[service.id] = getInitialImageDraft(service);
+        }
+      });
+
+      Object.keys(next).forEach((serviceId) => {
+        if (!serviceIds.has(serviceId)) {
+          delete next[serviceId];
+        }
+      });
+
+      return next;
+    });
+  }, [services]);
+
+  const updateServiceImageDraft = (serviceId: string, patch: Partial<ServiceImageDraft>) => {
+    setServiceImageDrafts((current) => ({
+      ...current,
+      [serviceId]: {
+        ...(current[serviceId] || { mode: 'url', url: '', file: null }),
+        ...patch,
+      },
+    }));
+    setServiceImageErrors((current) => ({ ...current, [serviceId]: '' }));
+    setServiceImageNotice('');
+  };
+
+  const setServiceImageError = (serviceId: string, message: string) => {
+    setServiceImageErrors((current) => ({ ...current, [serviceId]: message }));
+  };
+
+  const saveServiceImage = async (service: Service) => {
+    const draft = serviceImageDrafts[service.id] || getInitialImageDraft(service);
+
+    try {
+      setSavingImageFor(service.id);
+      setServiceImageError(service.id, '');
+      setServiceImageNotice('');
+
+      if (draft.mode === 'url') {
+        const imageUrl = draft.url.trim();
+
+        if (!imageUrl || !isValidHttpUrl(imageUrl)) {
+          setServiceImageError(service.id, 'Ingresa un link valido que empiece con http:// o https://.');
+          return;
+        }
+
+        await updateDoc(doc(db, 'services', service.id), {
+          imageUrl,
+          imageSourceType: 'url',
+          imageStoragePath: '',
+          imageUpdatedAt: new Date().toISOString(),
+        });
+
+        setServiceImageDrafts((current) => ({
+          ...current,
+          [service.id]: { mode: 'url', url: imageUrl, file: null },
+        }));
+        setServiceImageNotice(`Imagen de ${service.name} guardada.`);
+        return;
+      }
+
+      if (!draft.file) {
+        setServiceImageError(service.id, 'Selecciona una foto para subir.');
+        return;
+      }
+
+      if (!ALLOWED_SERVICE_IMAGE_TYPES.has(draft.file.type)) {
+        setServiceImageError(service.id, 'Subi una imagen JPG, PNG o WEBP.');
+        return;
+      }
+
+      if (draft.file.size > MAX_SERVICE_IMAGE_SIZE) {
+        setServiceImageError(service.id, 'La imagen no puede superar 5 MB.');
+        return;
+      }
+
+      const storagePath = `service-images/${service.id}/${Date.now()}-${makeSafePathSegment(service.name)}.${getFileExtension(draft.file)}`;
+      const imageRef = ref(storage, storagePath);
+      await uploadBytes(imageRef, draft.file, { contentType: draft.file.type });
+      const imageUrl = await getDownloadURL(imageRef);
+
+      await updateDoc(doc(db, 'services', service.id), {
+        imageUrl,
+        imageSourceType: 'upload',
+        imageStoragePath: storagePath,
+        imageUpdatedAt: new Date().toISOString(),
+      });
+
+      setServiceImageDrafts((current) => ({
+        ...current,
+        [service.id]: { mode: 'upload', url: imageUrl, file: null },
+      }));
+      setServiceImageNotice(`Imagen de ${service.name} subida y guardada.`);
+    } catch (error: any) {
+      console.error(error);
+      const isPermissionError = error?.code === 'storage/unauthorized' || error?.code === 'permission-denied';
+      setServiceImageError(
+        service.id,
+        isPermissionError
+          ? 'No tenes permisos para guardar esta imagen. Revisa reglas de Storage y Firestore.'
+          : 'No se pudo guardar la imagen. Revisa la conexion e intenta de nuevo.'
+      );
+    } finally {
+      setSavingImageFor(null);
+    }
+  };
 
   const saveService = async () => {
     if (!editingService) return;
@@ -171,14 +334,9 @@ export default function Admin() {
       .map((img) => ({ src: (img.src ?? '').trim(), alt: (img.alt ?? '').trim() || 'Trabajo' }))
       .filter((img) => img.src.length > 0);
 
-    if (normalizedGallery.length === 0) {
-      alert('Agrega al menos una imagen con URL valida en "Nuestros Trabajos".');
-      return;
-    }
-
     const nextSettings: StudioSettings = {
       depositAmount: settings.depositAmount,
-      galleryImages: normalizedGallery,
+      galleryImages: normalizedGallery.length > 0 ? normalizedGallery : DEFAULT_GALLERY_IMAGES,
       updatedAt: new Date().toISOString(),
     };
 
@@ -189,28 +347,6 @@ export default function Admin() {
     } catch (e) {
       handleFirestoreError(e, OperationType.WRITE, 'settings/global');
     }
-  };
-
-  const updateGalleryImage = (index: number, key: keyof GalleryImage, value: string) => {
-    const currentGallery = [...(settings.galleryImages ?? [])];
-    if (!currentGallery[index]) return;
-    currentGallery[index] = { ...currentGallery[index], [key]: value };
-    setSettings({ ...settings, galleryImages: currentGallery });
-  };
-
-  const addGalleryImage = () => {
-    const currentGallery = [...(settings.galleryImages ?? [])];
-    setSettings({ ...settings, galleryImages: [...currentGallery, { src: '', alt: '' }] });
-  };
-
-  const removeGalleryImage = (index: number) => {
-    const currentGallery = [...(settings.galleryImages ?? [])];
-    if (currentGallery.length <= 1) {
-      alert('Debe quedar al menos una imagen.');
-      return;
-    }
-    currentGallery.splice(index, 1);
-    setSettings({ ...settings, galleryImages: currentGallery });
   };
 
   const actAppt = async (id: string, status: 'confirmed' | 'cancelled') => {
@@ -304,41 +440,122 @@ export default function Admin() {
       </div>
 
       {tab === 'config' && (
-        <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm">
-          <h2 className="font-serif text-[18px] mb-4 text-primary">Monto de Sena (Fijo)</h2>
-          <input
-            type="number"
-            value={settings.depositAmount}
-            onChange={e => setSettings({ ...settings, depositAmount: Number(e.target.value) })}
-            className="w-full mb-4 bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3"
-          />
+        <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm space-y-8">
+          <section>
+            <h2 className="font-serif text-[18px] mb-4 text-primary">Monto de Sena (Fijo)</h2>
+            <input
+              type="number"
+              min="0"
+              value={settings.depositAmount}
+              onChange={e => setSettings({ ...settings, depositAmount: Number(e.target.value) })}
+              className="w-full mb-4 bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3"
+            />
+            <button onClick={saveSettings} className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium w-full sm:w-auto">Guardar Configuracion</button>
+          </section>
 
-          <div className="mt-8 mb-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-serif text-[18px] text-primary">Imagenes de Nuestros Trabajos</h3>
-              <button onClick={addGalleryImage} className="bg-secondary-container text-on-secondary-container py-2 px-4 rounded-lg text-sm font-medium shadow-sm">
-                + Agregar Imagen
-              </button>
-            </div>
-            <div className="space-y-4">
-              {(settings.galleryImages ?? []).map((img, index) => (
-                <div key={index} className="border border-outline-variant rounded-xl p-4 bg-white">
-                  <div className="flex justify-between items-center mb-3">
-                    <p className="text-sm font-medium text-primary">Imagen {index + 1}</p>
-                    <button onClick={() => removeGalleryImage(index)} className="text-xs bg-error-container text-error px-3 py-1 rounded-lg font-medium">
-                      Quitar
-                    </button>
-                  </div>
-                  <div className="space-y-3">
-                    <input type="url" value={img.src} onChange={e => updateGalleryImage(index, 'src', e.target.value)} className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="URL de imagen (https://...)" />
-                    <input type="text" value={img.alt} onChange={e => updateGalleryImage(index, 'alt', e.target.value)} className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Texto alternativo (ej. Manicura)" />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+          <section className="border-t border-outline-variant pt-8">
+            <h2 className="font-serif text-[18px] mb-4 text-primary">Imagenes por servicio</h2>
+            {serviceImageNotice && (
+              <div role="status" className="mb-4 rounded-xl border border-primary-container bg-primary-container px-4 py-3 text-sm text-primary">
+                {serviceImageNotice}
+              </div>
+            )}
 
-          <button onClick={saveSettings} className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium w-full sm:w-auto">Guardar Configuracion</button>
+            {services.length === 0 ? (
+              <p className="text-on-surface-variant bg-white border border-outline-variant rounded-xl p-4 text-center">No hay servicios cargados.</p>
+            ) : (
+              <div className="divide-y divide-outline-variant border-y border-outline-variant">
+                {services.map((service) => {
+                  const draft = serviceImageDrafts[service.id] || getInitialImageDraft(service);
+                  const savedImageUrl = (service.imageUrl || '').trim();
+                  const previewUrl = draft.mode === 'url' ? draft.url.trim() : savedImageUrl;
+                  const showPreview = previewUrl && isValidHttpUrl(previewUrl);
+                  const isSaving = savingImageFor === service.id;
+                  const saveLabel = draft.mode === 'upload'
+                    ? (isSaving ? 'Subiendo...' : 'Subir y guardar')
+                    : (isSaving ? 'Guardando...' : 'Guardar imagen');
+
+                  return (
+                    <div key={service.id} className="py-5">
+                      <div className="flex flex-col gap-4 md:flex-row md:items-start">
+                        <div className="h-28 w-full md:h-24 md:w-28 shrink-0 overflow-hidden rounded-xl border border-outline-variant bg-surface-container-highest">
+                          {showPreview ? (
+                            <img src={previewUrl} alt={service.name} className="h-full w-full object-cover" referrerPolicy="no-referrer" />
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-on-surface-variant">
+                              <span className="material-symbols-outlined text-[32px]">image</span>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="min-w-0 flex-1 space-y-3">
+                          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                            <div>
+                              <h3 className="font-sans text-[15px] font-medium text-primary">{service.name}</h3>
+                              <p className="text-[12px] text-on-surface-variant">{service.durationMinutes} min - ${service.price.toLocaleString('es-AR')}</p>
+                            </div>
+                            <div className="inline-flex w-full rounded-xl border border-outline-variant bg-white p-1 sm:w-auto">
+                              <button
+                                type="button"
+                                onClick={() => updateServiceImageDraft(service.id, { mode: 'url', file: null })}
+                                className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-all sm:flex-none ${draft.mode === 'url' ? 'bg-primary-container text-primary' : 'text-on-surface-variant'}`}
+                              >
+                                Link
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => updateServiceImageDraft(service.id, { mode: 'upload' })}
+                                className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-all sm:flex-none ${draft.mode === 'upload' ? 'bg-primary-container text-primary' : 'text-on-surface-variant'}`}
+                              >
+                                Subir foto
+                              </button>
+                            </div>
+                          </div>
+
+                          {draft.mode === 'url' ? (
+                            <input
+                              type="url"
+                              value={draft.url}
+                              onChange={e => updateServiceImageDraft(service.id, { url: e.target.value })}
+                              className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface"
+                              placeholder="https://..."
+                            />
+                          ) : (
+                            <div className="space-y-2">
+                              <input
+                                type="file"
+                                accept="image/jpeg,image/png,image/webp"
+                                onChange={e => updateServiceImageDraft(service.id, { file: e.target.files?.[0] || null })}
+                                className="w-full rounded-xl border border-outline-variant bg-white px-4 py-3 text-sm text-on-surface file:mr-4 file:rounded-lg file:border-0 file:bg-primary-container file:px-3 file:py-2 file:text-sm file:font-medium file:text-primary"
+                              />
+                              {draft.file && (
+                                <p className="text-xs text-on-surface-variant">{draft.file.name}</p>
+                              )}
+                            </div>
+                          )}
+
+                          {serviceImageErrors[service.id] && (
+                            <div role="alert" className="rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
+                              {serviceImageErrors[service.id]}
+                            </div>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => saveServiceImage(service)}
+                            disabled={isSaving}
+                            className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium w-full sm:w-auto disabled:opacity-60 disabled:cursor-not-allowed"
+                          >
+                            {saveLabel}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </div>
       )}
 
