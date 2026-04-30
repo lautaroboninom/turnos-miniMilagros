@@ -10,7 +10,20 @@ export const auth = getAuth(app);
 export const storage = getStorage(app);
 
 export const loginWithEmail = async (email: string, pass: string) => {
-  return await signInWithEmailAndPassword(auth, email, pass);
+  try {
+    return await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), pass);
+  } catch (error: any) {
+    if (
+      error?.code === 'auth/invalid-credential' ||
+      error?.code === 'auth/user-not-found' ||
+      error?.code === 'auth/wrong-password'
+    ) {
+      alert('Email o contrasena incorrectos. Revisa los datos o restablece la clave desde Firebase Authentication.');
+      return undefined;
+    }
+
+    throw error;
+  }
 };
 
 export const registerWithEmail = async (email: string, pass: string) => {
