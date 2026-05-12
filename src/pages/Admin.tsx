@@ -1,10 +1,19 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
-import { db, auth, storage, loginWithEmail, registerWithEmail, logout, handleFirestoreError, OperationType } from '../firebase';
-import { collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
+import ShareWeekPreview from '../components/ShareWeekPreview';
+import { db, auth, storage, loginWithEmail, logout, handleFirestoreError, OperationType } from '../firebase';
+import { collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc, getDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
-import { Service, Appointment, GalleryImage, StudioSettings } from '../types';
+import {
+  DEFAULT_EMPLOYEE_ID,
+  DEFAULT_EMPLOYEE_NAME,
+  Service,
+  Appointment,
+  Employee,
+  GalleryImage,
+  StudioSettings,
+} from '../types';
 import { format } from 'date-fns';
 
 const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
@@ -13,6 +22,13 @@ const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
   { src: 'https://picsum.photos/seed/facial1/400/600', alt: 'Facial' },
   { src: 'https://picsum.photos/seed/spa1/400/400', alt: 'Spa' },
 ];
+
+const DEFAULT_EMPLOYEE: Employee = {
+  id: DEFAULT_EMPLOYEE_ID,
+  name: DEFAULT_EMPLOYEE_NAME,
+  createdAt: '',
+  updatedAt: '',
+};
 
 type EditingService = Partial<Omit<Service, 'durationMinutes' | 'price'>> & {
   durationMinutes?: string;
@@ -30,11 +46,46 @@ type ServiceImageDraft = {
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
+const normalizeEmployeeName = (value: string) => value.trim().replace(/\s+/g, ' ');
+
+const getEmployeeIdWithFallback = (source?: Pick<Service, 'employeeId'> | Pick<Appointment, 'employeeId'> | null) => {
+  const employeeId = source?.employeeId?.trim();
+  return employeeId || DEFAULT_EMPLOYEE_ID;
+};
+
+const getEmployeeNameWithFallback = (source?: Pick<Service, 'employeeName'> | Pick<Appointment, 'employeeName'> | null) => {
+  const employeeName = source?.employeeName?.trim();
+  return employeeName || DEFAULT_EMPLOYEE_NAME;
+};
+
+const withDefaultEmployee = (sourceEmployees: Employee[]) => {
+  const byId = new Map<string, Employee>();
+  byId.set(DEFAULT_EMPLOYEE_ID, DEFAULT_EMPLOYEE);
+
+  sourceEmployees.forEach((employee) => {
+    const name = normalizeEmployeeName(employee.name || '');
+    if (!name) return;
+
+    byId.set(employee.id, {
+      ...employee,
+      name: employee.id === DEFAULT_EMPLOYEE_ID ? DEFAULT_EMPLOYEE_NAME : name,
+    });
+  });
+
+  return Array.from(byId.values()).sort((a, b) => {
+    if (a.id === DEFAULT_EMPLOYEE_ID) return -1;
+    if (b.id === DEFAULT_EMPLOYEE_ID) return 1;
+    return a.name.localeCompare(b.name);
+  });
+};
+
 const toEditingService = (service?: Service): EditingService => ({
   ...(service || {}),
   durationMinutes: service?.durationMinutes != null ? String(service.durationMinutes) : '',
   price: service?.price != null ? String(service.price) : '',
   isActive: service?.isActive ?? true,
+  employeeId: getEmployeeIdWithFallback(service),
+  employeeName: getEmployeeNameWithFallback(service),
 });
 
 const parseLocalizedNumber = (value?: string) => {
@@ -92,20 +143,57 @@ const makeSafePathSegment = (value: string) => (
     .slice(0, 40) || 'servicio'
 );
 
+const buildSettingsPayload = (source: StudioSettings): StudioSettings => {
+  const normalizedGallery = (source.galleryImages ?? [])
+    .map((img) => ({ src: (img.src ?? '').trim(), alt: (img.alt ?? '').trim() || 'Trabajo' }))
+    .filter((img) => img.src.length > 0);
+
+  const depositAmount = Number.isFinite(source.depositAmount) && source.depositAmount >= 0
+    ? source.depositAmount
+    : 0;
+
+  return {
+    depositAmount,
+    galleryImages: normalizedGallery.length > 0 ? normalizedGallery : DEFAULT_GALLERY_IMAGES,
+    updatedAt: new Date().toISOString(),
+  };
+};
+
+const getSettingsSaveErrorMessage = (error: any) => {
+  if (error?.code === 'permission-denied') {
+    return 'No tenes permisos para guardar la configuracion. Revisa las reglas de Firestore.';
+  }
+
+  if (error?.code === 'unavailable') {
+    return 'Firebase no esta disponible ahora. Revisa la conexion e intenta de nuevo.';
+  }
+
+  return 'No se pudo guardar la configuracion. Revisa la conexion e intenta de nuevo.';
+};
+
 export default function Admin() {
   const navigate = useNavigate();
   const [user, setUser] = useState(auth.currentUser);
   const [services, setServices] = useState<Service[]>([]);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([DEFAULT_EMPLOYEE]);
   const [settings, setSettings] = useState<StudioSettings>({
     depositAmount: 0,
     updatedAt: new Date().toISOString(),
     galleryImages: DEFAULT_GALLERY_IMAGES,
   });
-  const [tab, setTab] = useState<'turnos' | 'servicios' | 'config'>('turnos');
+  const [tab, setTab] = useState<'turnos' | 'compartir' | 'servicios' | 'empleadas' | 'config'>('turnos');
   const [email, setEmail] = useState('milagros@minimilagros.com');
-  const [password, setPassword] = useState('teamo210226');
+  const [password, setPassword] = useState('');
   const [uploadingGalleryIndex, setUploadingGalleryIndex] = useState<number | null>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsSaveError, setSettingsSaveError] = useState('');
+  const [settingsSaveNotice, setSettingsSaveNotice] = useState('');
+  const [editingEmployeeId, setEditingEmployeeId] = useState<string | null>(null);
+  const [employeeNameDraft, setEmployeeNameDraft] = useState('');
+  const [savingEmployee, setSavingEmployee] = useState(false);
+  const [employeeSaveError, setEmployeeSaveError] = useState('');
+  const [employeeSaveNotice, setEmployeeSaveNotice] = useState('');
 
   useEffect(() => {
     const unsubAuth = auth.onAuthStateChanged(u => setUser(u));
@@ -115,6 +203,38 @@ export default function Admin() {
   useEffect(() => {
     if (!user) return;
 
+    const ensureDefaultEmployee = async () => {
+      const employeeRef = doc(db, 'employees', DEFAULT_EMPLOYEE_ID);
+      const now = new Date().toISOString();
+
+      try {
+        const employeeSnap = await getDoc(employeeRef);
+        if (!employeeSnap.exists()) {
+          await setDoc(employeeRef, {
+            name: DEFAULT_EMPLOYEE_NAME,
+            createdAt: now,
+            updatedAt: now,
+          });
+          return;
+        }
+
+        if (employeeSnap.data().name !== DEFAULT_EMPLOYEE_NAME) {
+          await updateDoc(employeeRef, {
+            name: DEFAULT_EMPLOYEE_NAME,
+            updatedAt: now,
+          });
+        }
+      } catch (e) {
+        try {
+          handleFirestoreError(e, OperationType.WRITE, 'employees/milagros');
+        } catch {
+          // Keep the panel available even if seeding the default employee fails.
+        }
+      }
+    };
+
+    void ensureDefaultEmployee();
+
     const unsubServices = onSnapshot(collection(db, 'services'), snap => {
       setServices(snap.docs.map(d => ({ id: d.id, ...d.data() } as Service)));
     }, err => handleFirestoreError(err, OperationType.LIST, 'services'));
@@ -122,6 +242,10 @@ export default function Admin() {
     const unsubAppts = onSnapshot(query(collection(db, 'appointments')), snap => {
       setAppointments(snap.docs.map(d => ({ id: d.id, ...d.data() } as Appointment)));
     }, err => handleFirestoreError(err, OperationType.LIST, 'appointments'));
+
+    const unsubEmployees = onSnapshot(collection(db, 'employees'), snap => {
+      setEmployees(withDefaultEmployee(snap.docs.map(d => ({ id: d.id, ...d.data() } as Employee))));
+    }, err => handleFirestoreError(err, OperationType.LIST, 'employees'));
 
     const unsubSettings = onSnapshot(doc(db, 'settings', 'global'), snap => {
       if (!snap.exists()) return;
@@ -143,6 +267,7 @@ export default function Admin() {
     return () => {
       unsubServices();
       unsubAppts();
+      unsubEmployees();
       unsubSettings();
     };
   }, [user]);
@@ -154,6 +279,116 @@ export default function Admin() {
   const [savingImageFor, setSavingImageFor] = useState<string | null>(null);
   const [serviceImageErrors, setServiceImageErrors] = useState<Record<string, string>>({});
   const [serviceImageNotice, setServiceImageNotice] = useState('');
+  const employeeOptions = withDefaultEmployee(employees);
+
+  const findEmployee = (employeeId?: string) => (
+    employeeOptions.find((employee) => employee.id === (employeeId || DEFAULT_EMPLOYEE_ID))
+  );
+
+  const getServiceAssignedEmployeeName = (service: Service) => {
+    const employeeId = getEmployeeIdWithFallback(service);
+    return findEmployee(employeeId)?.name || getEmployeeNameWithFallback(service);
+  };
+
+  const beginEmployeeEdit = (employee: Employee) => {
+    if (employee.id === DEFAULT_EMPLOYEE_ID) return;
+    setEditingEmployeeId(employee.id);
+    setEmployeeNameDraft(employee.name);
+    setEmployeeSaveError('');
+    setEmployeeSaveNotice('');
+  };
+
+  const resetEmployeeForm = () => {
+    setEditingEmployeeId(null);
+    setEmployeeNameDraft('');
+    setEmployeeSaveError('');
+    setEmployeeSaveNotice('');
+  };
+
+  const saveEmployee = async () => {
+    const name = normalizeEmployeeName(employeeNameDraft);
+
+    if (!name) {
+      setEmployeeSaveError('Completa el nombre de la empleada.');
+      return;
+    }
+
+    const duplicateEmployee = employeeOptions.find((employee) => (
+      employee.id !== editingEmployeeId &&
+      employee.name.trim().toLowerCase() === name.toLowerCase()
+    ));
+
+    if (duplicateEmployee) {
+      setEmployeeSaveError('Ya existe una empleada con ese nombre.');
+      return;
+    }
+
+    try {
+      setSavingEmployee(true);
+      setEmployeeSaveError('');
+      setEmployeeSaveNotice('');
+
+      const now = new Date().toISOString();
+      if (editingEmployeeId) {
+        if (editingEmployeeId === DEFAULT_EMPLOYEE_ID) return;
+
+        await updateDoc(doc(db, 'employees', editingEmployeeId), {
+          name,
+          updatedAt: now,
+        });
+
+        await Promise.all(
+          services
+            .filter((service) => getEmployeeIdWithFallback(service) === editingEmployeeId)
+            .map((service) => updateDoc(doc(db, 'services', service.id), { employeeName: name }))
+        );
+
+        setEmployeeSaveNotice('Empleada actualizada.');
+      } else {
+        await addDoc(collection(db, 'employees'), {
+          name,
+          createdAt: now,
+          updatedAt: now,
+        });
+        setEmployeeSaveNotice('Empleada creada.');
+      }
+
+      setEditingEmployeeId(null);
+      setEmployeeNameDraft('');
+    } catch (e) {
+      setEmployeeSaveError('No se pudo guardar la empleada. Revisa permisos o conexion e intenta de nuevo.');
+      try {
+        handleFirestoreError(e, OperationType.WRITE, 'employees');
+      } catch {
+        // Keep the employee form available after logging the Firestore context.
+      }
+    } finally {
+      setSavingEmployee(false);
+    }
+  };
+
+  const deleteEmployee = async (employee: Employee) => {
+    if (employee.id === DEFAULT_EMPLOYEE_ID) return;
+
+    const assignedServicesCount = services.filter((service) => getEmployeeIdWithFallback(service) === employee.id).length;
+    if (assignedServicesCount > 0) {
+      alert('No se puede eliminar una empleada asignada a servicios.');
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'employees', employee.id));
+      if (editingEmployeeId === employee.id) resetEmployeeForm();
+      setEmployeeSaveNotice('Empleada eliminada.');
+    } catch (e) {
+      setEmployeeSaveError('No se pudo eliminar la empleada. Revisa permisos o conexion e intenta de nuevo.');
+      try {
+        handleFirestoreError(e, OperationType.DELETE, `employees/${employee.id}`);
+      } catch {
+        // Keep the employee list available after logging the Firestore context.
+      }
+    }
+  };
 
   useEffect(() => {
     setServiceImageDrafts((current) => {
@@ -291,11 +526,14 @@ export default function Admin() {
       return;
     }
 
+    const selectedEmployee = findEmployee(editingService.employeeId) || DEFAULT_EMPLOYEE;
     const serviceData = {
       name,
       durationMinutes: Math.round(durationMinutes),
       price: roundCurrency(price),
       isActive: editingService.isActive ?? true,
+      employeeId: selectedEmployee.id,
+      employeeName: selectedEmployee.name,
     };
 
     try {
@@ -330,27 +568,39 @@ export default function Admin() {
     }
   };
 
-  const saveSettings = async () => {
-    const normalizedGallery = (settings.galleryImages ?? [])
-      .map((img) => ({ src: (img.src ?? '').trim(), alt: (img.alt ?? '').trim() || 'Trabajo' }))
-      .filter((img) => img.src.length > 0);
-
-    const nextSettings: StudioSettings = {
-      depositAmount: settings.depositAmount,
-      galleryImages: normalizedGallery.length > 0 ? normalizedGallery : DEFAULT_GALLERY_IMAGES,
-      updatedAt: new Date().toISOString(),
-    };
+  const persistSettings = async (sourceSettings: StudioSettings, successMessage?: string) => {
+    const nextSettings = buildSettingsPayload(sourceSettings);
 
     try {
+      setSavingSettings(true);
+      setSettingsSaveError('');
+      setSettingsSaveNotice('');
       await setDoc(doc(db, 'settings', 'global'), nextSettings);
       setSettings(nextSettings);
-      alert('Configuracion guardada');
-    } catch (e) {
-      handleFirestoreError(e, OperationType.WRITE, 'settings/global');
+      if (successMessage) setSettingsSaveNotice(successMessage);
+      return true;
+    } catch (e: any) {
+      console.error('Settings save error', e);
+      setSettingsSaveError(getSettingsSaveErrorMessage(e));
+      try {
+        handleFirestoreError(e, OperationType.WRITE, 'settings/global');
+      } catch {
+        // Keep the admin panel open while still logging the Firestore context.
+      }
+      return false;
+    } finally {
+      setSavingSettings(false);
     }
   };
 
+  const saveSettings = async () => {
+    const saved = await persistSettings(settings, 'Configuracion guardada.');
+    if (saved) alert('Configuracion guardada');
+  };
+
   const updateGalleryImage = (index: number, key: keyof GalleryImage, value: string) => {
+    setSettingsSaveError('');
+    setSettingsSaveNotice('');
     setSettings((prev) => {
       const currentGallery = [...(prev.galleryImages ?? [])];
       if (!currentGallery[index]) return prev;
@@ -360,6 +610,8 @@ export default function Admin() {
   };
 
   const addGalleryImage = () => {
+    setSettingsSaveError('');
+    setSettingsSaveNotice('');
     setSettings((prev) => {
       const currentGallery = [...(prev.galleryImages ?? [])];
       return { ...prev, galleryImages: [...currentGallery, { src: '', alt: '' }] };
@@ -372,6 +624,8 @@ export default function Admin() {
       return;
     }
 
+    setSettingsSaveError('');
+    setSettingsSaveNotice('');
     setSettings((prev) => {
       const currentGallery = [...(prev.galleryImages ?? [])];
       currentGallery.splice(index, 1);
@@ -401,11 +655,21 @@ export default function Admin() {
       await uploadBytes(storageRef, file, { contentType: file.type });
       const downloadUrl = await getDownloadURL(storageRef);
 
-      updateGalleryImage(index, 'src', downloadUrl);
-
+      const nextGallery = [...(settings.galleryImages ?? [])];
       const currentAlt = settings.galleryImages?.[index]?.alt?.trim() ?? '';
-      if (!currentAlt) {
-        updateGalleryImage(index, 'alt', baseName.trim() || `Trabajo ${index + 1}`);
+      nextGallery[index] = {
+        ...(nextGallery[index] ?? { src: '', alt: '' }),
+        src: downloadUrl,
+        alt: currentAlt || baseName.trim() || `Trabajo ${index + 1}`,
+      };
+
+      const saved = await persistSettings(
+        { ...settings, galleryImages: nextGallery },
+        'Imagen subida y guardada automaticamente.'
+      );
+
+      if (!saved) {
+        alert('La imagen se subio, pero no se pudo guardar en la configuracion. Usa Guardar Configuracion para reintentar.');
       }
     } catch (e) {
       console.error('Gallery upload error', e);
@@ -437,32 +701,43 @@ export default function Admin() {
       { name: 'Hidra lips', durationMinutes: 45, price: 9000 },
     ];
     for (const bs of baseServices) {
-      await addDoc(collection(db, 'services'), { ...bs, isActive: true, createdAt: new Date().toISOString() });
+      await addDoc(collection(db, 'services'), {
+        ...bs,
+        employeeId: DEFAULT_EMPLOYEE_ID,
+        employeeName: DEFAULT_EMPLOYEE_NAME,
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      });
     }
     alert('Servicios base cargados');
   };
 
   const handleLogin = async (e: FormEvent) => {
     e.preventDefault();
-    if (!email || !password) return;
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password) return;
+
     try {
-      await loginWithEmail(email, password);
+      await loginWithEmail(normalizedEmail, password);
     } catch (err: any) {
-      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found') {
-        if (email === 'milagros@minimilagros.com') {
-          try {
-            await registerWithEmail(email, password);
-            return;
-          } catch (regErr: any) {
-            console.error(regErr);
-            alert("Para ingresar, debes habilitar el proveedor 'Correo electronico/Contrasena' en Firebase.");
-          }
-        } else {
-          alert('Credenciales incorrectas');
-        }
-      } else {
-        alert("Asegurate de tener habilitado 'Correo electronico/Contrasena' en Firebase Authentication.");
+      console.error('Login error', err);
+
+      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
+        alert('Email o contrasena incorrectos. Revisa los datos o restablece la clave desde Firebase Authentication.');
+        return;
       }
+
+      if (err.code === 'auth/operation-not-allowed') {
+        alert("Para ingresar, habilita el proveedor 'Correo electronico/Contrasena' en Firebase Authentication.");
+        return;
+      }
+
+      if (err.code === 'auth/too-many-requests') {
+        alert('Firebase bloqueo temporalmente los intentos de ingreso. Espera unos minutos y proba de nuevo.');
+        return;
+      }
+
+      alert('No se pudo ingresar. Revisa la conexion e intenta nuevamente.');
     }
   };
 
@@ -472,8 +747,8 @@ export default function Admin() {
         <div className="text-center py-10 bg-background border border-primary-container rounded-[20px] shadow-sm max-w-sm mx-auto">
           <h1 className="text-[24px] font-serif text-primary mb-6">Acceso a Gestor</h1>
           <form onSubmit={handleLogin} className="flex flex-col gap-4 px-6 mb-4">
-            <input type="email" value={email} onChange={e => setEmail(e.target.value)} className="bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Tu Email" required />
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)} className="bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Contrasena" required />
+            <input type="email" autoComplete="username" value={email} onChange={e => setEmail(e.target.value)} className="bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Tu Email" required />
+            <input type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} className="bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Contrasena" required />
             <button type="submit" className="bg-primary-dim text-white py-3 rounded-xl font-medium shadow-sm hover:opacity-90 transition-all mt-2">
               Ingresar a la cuenta
             </button>
@@ -497,13 +772,27 @@ export default function Admin() {
         <button onClick={() => setTab('turnos')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'turnos' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
           Turnos
         </button>
+        <button onClick={() => setTab('compartir')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'compartir' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
+          Compartir
+        </button>
         <button onClick={() => setTab('servicios')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'servicios' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
           Servicios
+        </button>
+        <button onClick={() => setTab('empleadas')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'empleadas' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
+          Empleadas
         </button>
         <button onClick={() => setTab('config')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'config' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
           Configuracion
         </button>
       </div>
+
+      {tab === 'compartir' && (
+        <ShareWeekPreview
+          services={services}
+          appointments={appointments}
+          galleryImages={settings.galleryImages}
+        />
+      )}
 
       {tab === 'config' && (
         <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm space-y-8">
@@ -582,7 +871,87 @@ export default function Admin() {
             </div>
           </section>
 
-          <button onClick={saveSettings} className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium w-full sm:w-auto">Guardar Configuracion</button>
+          {settingsSaveNotice && (
+            <div role="status" className="rounded-xl border border-primary-container bg-primary-container px-4 py-3 text-sm text-primary">
+              {settingsSaveNotice}
+            </div>
+          )}
+          {settingsSaveError && (
+            <div role="alert" className="rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
+              {settingsSaveError}
+            </div>
+          )}
+          <button
+            onClick={saveSettings}
+            disabled={savingSettings}
+            className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium w-full sm:w-auto disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {savingSettings ? 'Guardando...' : 'Guardar Configuracion'}
+          </button>
+        </div>
+      )}
+
+      {tab === 'empleadas' && (
+        <div className="space-y-6">
+          <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm">
+            <h2 className="font-serif text-[18px] mb-4 text-primary">{editingEmployeeId ? 'Editar Empleada' : 'Nueva Empleada'}</h2>
+            <div className="space-y-4">
+              {employeeSaveNotice && (
+                <div role="status" className="rounded-xl border border-primary-container bg-primary-container px-4 py-3 text-sm text-primary">
+                  {employeeSaveNotice}
+                </div>
+              )}
+              {employeeSaveError && (
+                <div role="alert" className="rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
+                  {employeeSaveError}
+                </div>
+              )}
+              <input
+                type="text"
+                placeholder="Nombre de la empleada"
+                value={employeeNameDraft}
+                onChange={e => { setEmployeeNameDraft(e.target.value); setEmployeeSaveError(''); setEmployeeSaveNotice(''); }}
+                className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+              />
+              <div className="flex gap-3">
+                <button onClick={saveEmployee} disabled={savingEmployee} className="bg-primary-dim text-white font-medium py-2 px-6 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed">
+                  {savingEmployee ? 'Guardando...' : 'Guardar'}
+                </button>
+                {editingEmployeeId && (
+                  <button onClick={resetEmployeeForm} className="bg-surface-container-highest text-on-surface font-medium py-2 px-6 rounded-xl">
+                    Cancelar
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {employeeOptions.map((employee) => {
+              const assignedServicesCount = services.filter((service) => getEmployeeIdWithFallback(service) === employee.id).length;
+              const isDefaultEmployee = employee.id === DEFAULT_EMPLOYEE_ID;
+
+              return (
+                <div key={employee.id} className="bg-background border border-primary-container p-4 rounded-[16px] flex justify-between items-center gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <h4 className="font-sans font-medium text-[15px] text-primary">{employee.name}</h4>
+                      {isDefaultEmployee && (
+                        <span className="text-[10px] uppercase tracking-[1px] font-bold px-2 py-1 rounded bg-primary-container text-primary">Default</span>
+                      )}
+                    </div>
+                    <span className="text-[12px] text-on-surface-variant font-light">{assignedServicesCount} servicios asignados</span>
+                  </div>
+                  {!isDefaultEmployee && (
+                    <div className="flex gap-2">
+                      <button onClick={() => beginEmployeeEdit(employee)} className="p-2 text-primary-dim hover:text-primary transition-colors bg-primary-container rounded-lg"><span className="material-symbols-outlined text-[18px]">edit</span></button>
+                      <button onClick={() => void deleteEmployee(employee)} className="p-2 text-error bg-error-container rounded-lg"><span className="material-symbols-outlined text-[18px]">delete</span></button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -609,6 +978,26 @@ export default function Admin() {
                   </div>
                 )}
                 <input type="text" placeholder="Nombre (ej. Esmaltado)" value={editingService.name || ''} onChange={e => { setEditingService({ ...editingService, name: e.target.value }); setServiceSaveError(''); }} className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                <label className="block">
+                  <span className="block text-sm font-medium text-primary mb-2">Empleada</span>
+                  <select
+                    value={editingService.employeeId || DEFAULT_EMPLOYEE_ID}
+                    onChange={e => {
+                      const selectedEmployee = findEmployee(e.target.value) || DEFAULT_EMPLOYEE;
+                      setEditingService({
+                        ...editingService,
+                        employeeId: selectedEmployee.id,
+                        employeeName: selectedEmployee.name,
+                      });
+                      setServiceSaveError('');
+                    }}
+                    className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                  >
+                    {employeeOptions.map((employee) => (
+                      <option key={employee.id} value={employee.id}>{employee.name}</option>
+                    ))}
+                  </select>
+                </label>
                 <div className="flex gap-4">
                   <input type="text" inputMode="numeric" placeholder="Minutos (ej. 35)" value={editingService.durationMinutes || ''} onChange={e => { setEditingService({ ...editingService, durationMinutes: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
                   <input type="text" inputMode="decimal" placeholder="Precio ($)" value={editingService.price || ''} onChange={e => { setEditingService({ ...editingService, price: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
@@ -632,6 +1021,7 @@ export default function Admin() {
               <div key={s.id} className="bg-background border border-primary-container p-4 rounded-[16px] flex justify-between items-center">
                 <div>
                   <h4 className="font-sans font-medium text-[15px] text-primary mb-1">{s.name}</h4>
+                  <p className="text-[12px] text-on-surface-variant font-light">Atiende: {getServiceAssignedEmployeeName(s)}</p>
                   <span className="text-[12px] text-on-surface-variant font-light">{s.durationMinutes} min • ${s.price.toLocaleString('es-AR')}</span>
                 </div>
                 <div className="flex gap-2">
@@ -756,6 +1146,7 @@ export default function Admin() {
                 <div>
                   <p className="font-serif text-[18px] tracking-tight text-primary">{appt.clientFirstName} {appt.clientLastName}</p>
                   <p className="text-[13px] text-on-surface-variant font-medium">{appt.serviceName}</p>
+                  <p className="text-[12px] text-on-surface-variant">Atiende: {getEmployeeNameWithFallback(appt)}</p>
                 </div>
                 <div className="text-right">
                   <p className="font-bold text-[14px] text-primary">{format(new Date(appt.date), 'dd/MM/yyyy')}</p>

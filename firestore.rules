@@ -12,6 +12,8 @@ service cloud.firestore {
     //   - price: number (required) - Price in ARS
     //   - isActive: bool (required) - Whether the service is currently offered
     //   - createdAt: timestamp (required)
+    //   - employeeId: string (optional) - Assigned employee ID
+    //   - employeeName: string (optional) - Assigned employee name snapshot
     //   - imageUrl: string (optional) - Public image URL
     //   - imageSourceType: string (optional) ['url', 'upload']
     //   - imageStoragePath: string (optional) - Firebase Storage path
@@ -32,6 +34,15 @@ service cloud.firestore {
     //   - status: string (required) ['pending', 'confirmed', 'cancelled']
     //   - depositAmount: number (required)
     //   - createdAt: timestamp (required)
+    //   - employeeId: string (optional) - Assigned employee ID
+    //   - employeeName: string (optional) - Assigned employee name snapshot
+    //
+    // Collection: employees
+    // Document ID: string
+    // Fields:
+    //   - name: string (required)
+    //   - createdAt: string (required)
+    //   - updatedAt: string (required)
     //
     // Collection: settings
     // Document ID: 'global'
@@ -68,11 +79,13 @@ service cloud.firestore {
     // Domain Validators
     // ===============================================================
     function isValidService(data) {
-      return hasOnlyAllowedFields(['name', 'durationMinutes', 'price', 'isActive', 'createdAt', 'imageUrl', 'imageSourceType', 'imageStoragePath', 'imageUpdatedAt']) &&
+      return hasOnlyAllowedFields(['name', 'durationMinutes', 'price', 'isActive', 'createdAt', 'employeeId', 'employeeName', 'imageUrl', 'imageSourceType', 'imageStoragePath', 'imageUpdatedAt']) &&
         data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
         data.durationMinutes is number && data.durationMinutes > 0 &&
         data.price is number && data.price >= 0 &&
         data.isActive is bool &&
+        (!data.keys().hasAny(['employeeId']) || (data.employeeId is string && data.employeeId.size() > 0 && data.employeeId.size() <= 120)) &&
+        (!data.keys().hasAny(['employeeName']) || (data.employeeName is string && data.employeeName.size() > 0 && data.employeeName.size() <= 80)) &&
         (!data.keys().hasAny(['imageUrl']) || (data.imageUrl is string && data.imageUrl.size() <= 2000)) &&
         (!data.keys().hasAny(['imageSourceType']) || data.imageSourceType in ['url', 'upload']) &&
         (!data.keys().hasAny(['imageStoragePath']) || (data.imageStoragePath is string && data.imageStoragePath.size() <= 300)) &&
@@ -80,7 +93,7 @@ service cloud.firestore {
     }
 
     function isValidAppointment(data) {
-      return hasOnlyAllowedFields(['serviceId', 'serviceName', 'durationMinutes', 'price', 'date', 'startTime', 'endTime', 'clientFirstName', 'clientLastName', 'status', 'depositAmount', 'createdAt']) &&
+      return hasOnlyAllowedFields(['serviceId', 'serviceName', 'durationMinutes', 'price', 'date', 'startTime', 'endTime', 'clientFirstName', 'clientLastName', 'status', 'depositAmount', 'createdAt', 'employeeId', 'employeeName']) &&
         data.serviceId is string && data.serviceId.size() > 0 &&
         data.serviceName is string && data.serviceName.size() > 0 && data.serviceName.size() <= 100 &&
         data.durationMinutes is number && data.durationMinutes > 0 &&
@@ -91,7 +104,16 @@ service cloud.firestore {
         data.clientFirstName is string && data.clientFirstName.size() > 0 && data.clientFirstName.size() <= 50 &&
         data.clientLastName is string && data.clientLastName.size() > 0 && data.clientLastName.size() <= 50 &&
         data.status in ['pending', 'confirmed', 'cancelled'] &&
+        (!data.keys().hasAny(['employeeId']) || (data.employeeId is string && data.employeeId.size() > 0 && data.employeeId.size() <= 120)) &&
+        (!data.keys().hasAny(['employeeName']) || (data.employeeName is string && data.employeeName.size() > 0 && data.employeeName.size() <= 80)) &&
         data.depositAmount is number && data.depositAmount >= 0;
+    }
+
+    function isValidEmployee(data) {
+      return data.keys().hasOnly(['name', 'createdAt', 'updatedAt']) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 80 &&
+        data.createdAt is string &&
+        data.updatedAt is string;
     }
 
     function isValidSettings(data) {
@@ -124,6 +146,13 @@ service cloud.firestore {
       // Admin can update/cancel/view all appointments
       allow update: if isAdmin() && isValidAppointment(request.resource.data);
       allow delete: if isAdmin();
+    }
+
+    match /employees/{employeeId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidEmployee(request.resource.data);
+      allow update: if isAdmin() && isValidEmployee(request.resource.data);
+      allow delete: if isAdmin() && employeeId != "milagros";
     }
     
     match /settings/{docId} {

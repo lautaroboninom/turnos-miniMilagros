@@ -3,9 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { doc, getDoc, collection, query, where, getDocs, addDoc } from 'firebase/firestore';
-import { Service, StudioSettings } from '../types';
-import { format, addMinutes, parse, isBefore, startOfDay, endOfDay, addDays, getDay } from 'date-fns';
+import { DEFAULT_EMPLOYEE_ID, DEFAULT_EMPLOYEE_NAME, Service, StudioSettings } from '../types';
+import { format, addMinutes, parse, addDays, getDay } from 'date-fns';
 import { es } from 'date-fns/locale';
+import { getAvailableSlotsForDate, type AvailabilityAppointment } from '../lib/availability';
+
+const getServiceEmployeeId = (service: Service) => service.employeeId?.trim() || DEFAULT_EMPLOYEE_ID;
+const getServiceEmployeeName = (service: Service) => service.employeeName?.trim() || DEFAULT_EMPLOYEE_NAME;
 
 export default function Booking() {
   const { serviceId } = useParams();
@@ -64,51 +68,27 @@ export default function Booking() {
       }
 
       const dateStr = format(selectedDate, 'yyyy-MM-dd');
+      const serviceEmployeeId = getServiceEmployeeId(service);
       
       // Fetch appointments for this day
       try {
         const q = query(collection(db, 'appointments'), where('date', '==', dateStr), where('status', 'in', ['pending', 'confirmed']));
         const snap = await getDocs(q);
         
-        const bookedIntervals = snap.docs.map(d => {
-          const data = d.data();
-          const start = parse(data.startTime, 'HH:mm', selectedDate);
-          const end = parse(data.endTime, 'HH:mm', selectedDate);
-          return { start, end };
-        });
+        const relevantAppointments = snap.docs
+          .map(d => d.data() as AvailabilityAppointment & { employeeId?: string })
+          .filter(data => {
+            const appointmentEmployeeId = typeof data.employeeId === 'string' && data.employeeId.trim()
+              ? data.employeeId.trim()
+              : DEFAULT_EMPLOYEE_ID;
+            return appointmentEmployeeId === serviceEmployeeId;
+          });
 
-        // Generate options every 30 mins
-        let current = parse('08:00', 'HH:mm', selectedDate);
-        const endOfDayLimit = parse('19:00', 'HH:mm', selectedDate);
-        
-        const slots: string[] = [];
-        
-        while (isBefore(current, endOfDayLimit)) {
-          const potentialEnd = addMinutes(current, service.durationMinutes);
-          
-          if (isBefore(potentialEnd, addMinutes(endOfDayLimit, 1))) {
-            // Check overlaps
-            let overlap = false;
-            for (const { start, end } of bookedIntervals) {
-              if (
-                (isBefore(current, end) && isBefore(start, potentialEnd))
-              ) {
-                overlap = true;
-                break;
-              }
-            }
-            
-            // If today, check if it's in the past
-            if (dateStr === format(new Date(), 'yyyy-MM-dd') && isBefore(current, new Date())) {
-              overlap = true;
-            }
-
-            if (!overlap) {
-              slots.push(format(current, 'HH:mm'));
-            }
-          }
-          current = addMinutes(current, 30); // 30 min increments
-        }
+        const slots = getAvailableSlotsForDate(
+          selectedDate,
+          service.durationMinutes,
+          relevantAppointments
+        );
         
         setAvailableSlots(slots);
       } catch (error) {
@@ -129,10 +109,14 @@ export default function Booking() {
       const timeParsed = parse(selectedTime, 'HH:mm', selectedDate);
       const endTimeParsed = addMinutes(timeParsed, service.durationMinutes);
       const endTimeStr = format(endTimeParsed, 'HH:mm');
+      const employeeId = getServiceEmployeeId(service);
+      const employeeName = getServiceEmployeeName(service);
       
       const newAppt = {
         serviceId: service.id,
         serviceName: service.name,
+        employeeId,
+        employeeName,
         durationMinutes: service.durationMinutes,
         price: service.price,
         date: dateStr,
@@ -246,6 +230,7 @@ export default function Booking() {
                <div>
                   <p className="text-[12px] text-on-surface-variant mb-1">Servicio</p>
                   <p className="font-sans font-medium text-[15px] text-primary">{service.name}</p>
+                  <p className="text-on-surface-variant text-[12px] mt-1">Atiende: {getServiceEmployeeName(service)}</p>
                </div>
                <p className="font-bold text-[14px] text-primary">${service.price}</p>
              </div>

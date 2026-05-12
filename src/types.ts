@@ -1,3 +1,13 @@
+export const DEFAULT_EMPLOYEE_ID = 'milagros';
+export const DEFAULT_EMPLOYEE_NAME = 'Milagros';
+
+export interface Employee {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Service {
   id: string;
   name: string;
@@ -5,6 +15,8 @@ export interface Service {
   price: number;
   isActive: boolean;
   createdAt: string;
+  employeeId?: string;
+  employeeName?: string;
   imageUrl?: string;
   imageSourceType?: 'url' | 'upload';
   imageStoragePath?: string;
@@ -25,6 +37,8 @@ export interface Appointment {
   status: 'pending' | 'confirmed' | 'cancelled';
   depositAmount: number;
   createdAt: string;
+  employeeId?: string;
+  employeeName?: string;
 }
 
 export interface GalleryImage {
