@@ -79,7 +79,7 @@ export default function AdminAutoSave() {
 
       try {
         savingRef.current = true;
-        await setDoc(doc(db, 'settings', 'global'), nextSettings);
+        await setDoc(doc(db, 'settings', 'global'), nextSettings, { merge: true });
         if (showAlert) alert('Configuracion guardada');
       } catch (error: any) {
         console.error('Settings save error', error);

@@ -5,6 +5,8 @@ export const BUSINESS_START_TIME = '08:00';
 export const BUSINESS_END_TIME = '19:00';
 export const SLOT_INTERVAL_MINUTES = 30;
 export const SHARE_SLOT_TIMES = ['08:00', '10:00', '13:00', '15:00', '17:00', '18:00'] as const;
+export const SHARE_SLOT_DURATION_MINUTES = 30;
+export const MAX_SHARE_SLOT_TIMES = 8;
 
 export type ShareSlotStatus = 'free' | 'unavailable';
 
@@ -34,6 +36,32 @@ export const isBlockingAppointment = (appointment: AvailabilityAppointment) => (
 );
 
 const parseTimeForDate = (date: Date, time: string) => parse(time, 'HH:mm', date);
+
+export const isValidTimeValue = (time: unknown): time is string => (
+  typeof time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(time)
+);
+
+export const getTimeValueMinutes = (time: string) => {
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+
+export const normalizeShareSlotTimes = (slotTimes: unknown): string[] => {
+  const source = Array.isArray(slotTimes) ? slotTimes : SHARE_SLOT_TIMES;
+  const uniqueTimes = new Set<string>();
+
+  source.forEach((time) => {
+    if (isValidTimeValue(time)) {
+      uniqueTimes.add(time);
+    }
+  });
+
+  const normalizedTimes = Array.from(uniqueTimes)
+    .sort((a, b) => getTimeValueMinutes(a) - getTimeValueMinutes(b))
+    .slice(0, MAX_SHARE_SLOT_TIMES);
+
+  return normalizedTimes.length > 0 ? normalizedTimes : [...SHARE_SLOT_TIMES];
+};
 
 const isSameDateAppointment = (date: Date, appointment: AvailabilityAppointment) => (
   !appointment.date || appointment.date === getDateKey(date)
@@ -117,9 +145,9 @@ export const getShareSlotsForDate = (
   date: Date,
   durationMinutes: number,
   appointments: AvailabilityAppointment[],
+  slotTimes: unknown = SHARE_SLOT_TIMES,
 ): ShareSlot[] => (
-  SHARE_SLOT_TIMES
-    .filter((time) => slotFitsBeforeClose(date, time, durationMinutes))
+  normalizeShareSlotTimes(slotTimes)
     .map((time) => ({
       time,
       status: getSlotStatus(date, time, durationMinutes, appointments),
@@ -130,13 +158,14 @@ export const buildShareWeekAvailability = (
   weekStart: Date,
   durationMinutes: number,
   appointments: AvailabilityAppointment[],
+  slotTimes: unknown = SHARE_SLOT_TIMES,
 ): ShareDayAvailability[] => (
   Array.from({ length: 6 }, (_, index) => {
     const date = addDays(weekStart, index);
     return {
       date,
       dateKey: getDateKey(date),
-      slots: getShareSlotsForDate(date, durationMinutes, appointments),
+      slots: getShareSlotsForDate(date, durationMinutes, appointments, slotTimes),
     };
   })
 );

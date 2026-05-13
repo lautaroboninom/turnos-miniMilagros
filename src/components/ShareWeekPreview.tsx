@@ -1,27 +1,39 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { addDays, addWeeks, format, startOfWeek, subWeeks } from 'date-fns';
 import { es } from 'date-fns/locale';
-import {
-  DEFAULT_EMPLOYEE_ID,
-  type Appointment,
-  type GalleryImage,
-  type Service,
+import type {
+  Appointment,
+  GalleryImage,
+  Service,
 } from '../types';
-import { buildShareWeekAvailability, type ShareSlotStatus } from '../lib/availability';
+import {
+  buildShareWeekAvailability,
+  isValidTimeValue,
+  MAX_SHARE_SLOT_TIMES,
+  normalizeShareSlotTimes,
+  SHARE_SLOT_DURATION_MINUTES,
+  SHARE_SLOT_TIMES,
+  type ShareSlotStatus,
+} from '../lib/availability';
 
 type ShareWeekPreviewProps = {
   services: Service[];
   appointments: Appointment[];
   galleryImages?: GalleryImage[];
+  slotTimes?: string[];
+  onSlotTimesChange: (slotTimes: string[]) => void;
+  onSaveSlotTimes: (slotTimes: string[]) => void | Promise<void>;
+  savingSlotTimes?: boolean;
+  slotTimesSaveNotice?: string;
+  slotTimesSaveError?: string;
 };
-
-const getServiceEmployeeId = (service: Service) => service.employeeId?.trim() || DEFAULT_EMPLOYEE_ID;
-
-const getAppointmentEmployeeId = (appointment: Appointment) => appointment.employeeId?.trim() || DEFAULT_EMPLOYEE_ID;
 
 const capitalize = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
 
-const formatShareTime = (time: string) => `${time.slice(0, 2)}hs`;
+const formatShareTime = (time: string) => {
+  const [hours, minutes] = time.split(':');
+  return minutes === '00' ? `${hours}hs` : `${hours}:${minutes}hs`;
+};
 
 const formatWeekRange = (weekStart: Date) => {
   const weekEnd = addDays(weekStart, 5);
@@ -35,12 +47,10 @@ const formatWeekRange = (weekStart: Date) => {
 };
 
 const getBackgroundImage = (
-  selectedService: Service | undefined,
   services: Service[],
   galleryImages: GalleryImage[] | undefined,
 ) => (
-  selectedService?.imageUrl?.trim() ||
-  services.find((service) => service.imageUrl?.trim())?.imageUrl?.trim() ||
+  services.find((service) => service.isActive && service.imageUrl?.trim())?.imageUrl?.trim() ||
   galleryImages?.find((image) => image.src.trim())?.src.trim() ||
   '/mini-milagros-watermark.webp'
 );
@@ -51,73 +61,83 @@ const getSlotClassName = (status: ShareSlotStatus) => (
     : 'relative inline-block text-white'
 );
 
-export default function ShareWeekPreview({ services, appointments, galleryImages }: ShareWeekPreviewProps) {
-  const [selectedServiceId, setSelectedServiceId] = useState('');
+export default function ShareWeekPreview({
+  services,
+  appointments,
+  galleryImages,
+  slotTimes,
+  onSlotTimesChange,
+  onSaveSlotTimes,
+  savingSlotTimes = false,
+  slotTimesSaveNotice = '',
+  slotTimesSaveError = '',
+}: ShareWeekPreviewProps) {
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date(), { weekStartsOn: 1 }));
+  const [newSlotTime, setNewSlotTime] = useState('');
+  const [slotTimeInputError, setSlotTimeInputError] = useState('');
 
-  const selectableServices = useMemo(
-    () => services
-      .filter((service) => service.isActive)
-      .sort((a, b) => a.name.localeCompare(b.name)),
-    [services],
+  const normalizedSlotTimes = useMemo(() => normalizeShareSlotTimes(slotTimes), [slotTimes]);
+  const hasManySlotTimes = normalizedSlotTimes.length > 6;
+
+  const weekAvailability = useMemo(
+    () => buildShareWeekAvailability(
+      weekStart,
+      SHARE_SLOT_DURATION_MINUTES,
+      appointments,
+      normalizedSlotTimes,
+    ),
+    [appointments, normalizedSlotTimes, weekStart],
   );
 
-  useEffect(() => {
-    if (selectableServices.length === 0) {
-      if (selectedServiceId) setSelectedServiceId('');
+  const backgroundImage = getBackgroundImage(services, galleryImages);
+
+  const updateSlotTimes = (nextSlotTimes: string[]) => {
+    setSlotTimeInputError('');
+    onSlotTimesChange(normalizeShareSlotTimes(nextSlotTimes));
+  };
+
+  const addSlotTime = () => {
+    if (!isValidTimeValue(newSlotTime)) {
+      setSlotTimeInputError('Elegi un horario valido.');
       return;
     }
 
-    if (!selectableServices.some((service) => service.id === selectedServiceId)) {
-      setSelectedServiceId(selectableServices[0].id);
+    if (normalizedSlotTimes.includes(newSlotTime)) {
+      setSlotTimeInputError('Ese horario ya esta.');
+      return;
     }
-  }, [selectableServices, selectedServiceId]);
 
-  const selectedService = selectableServices.find((service) => service.id === selectedServiceId);
+    if (normalizedSlotTimes.length >= MAX_SHARE_SLOT_TIMES) {
+      setSlotTimeInputError(`Maximo ${MAX_SHARE_SLOT_TIMES} horarios.`);
+      return;
+    }
 
-  const relevantAppointments = useMemo(() => {
-    if (!selectedService) return [];
-    const serviceEmployeeId = getServiceEmployeeId(selectedService);
-    return appointments.filter((appointment) => getAppointmentEmployeeId(appointment) === serviceEmployeeId);
-  }, [appointments, selectedService]);
+    updateSlotTimes([...normalizedSlotTimes, newSlotTime]);
+    setNewSlotTime('');
+  };
 
-  const weekAvailability = useMemo(
-    () => selectedService
-      ? buildShareWeekAvailability(weekStart, selectedService.durationMinutes, relevantAppointments)
-      : [],
-    [relevantAppointments, selectedService, weekStart],
-  );
+  const removeSlotTime = (time: string) => {
+    if (normalizedSlotTimes.length <= 1) {
+      setSlotTimeInputError('Deja al menos un horario.');
+      return;
+    }
 
-  const backgroundImage = getBackgroundImage(selectedService, selectableServices, galleryImages);
+    updateSlotTimes(normalizedSlotTimes.filter((slotTime) => slotTime !== time));
+  };
 
-  if (selectableServices.length === 0) {
-    return (
-      <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm">
-        <h2 className="font-serif text-[18px] mb-2 text-primary">Compartir turnos</h2>
-        <p className="text-sm text-on-surface-variant">No hay servicios activos para armar la placa.</p>
-      </div>
-    );
-  }
+  const resetSlotTimes = () => {
+    setNewSlotTime('');
+    updateSlotTimes([...SHARE_SLOT_TIMES]);
+  };
+
+  const saveSlotTimes = () => {
+    void onSaveSlotTimes(normalizedSlotTimes);
+  };
 
   return (
     <div className="space-y-6">
-      <div className="bg-background border border-primary-container p-5 rounded-[16px] shadow-sm space-y-4">
+      <div className="bg-background border border-primary-container p-5 rounded-[16px] shadow-sm space-y-5">
         <h2 className="font-serif text-[18px] text-primary">Compartir turnos</h2>
-
-        <label className="block">
-          <span className="block text-sm font-medium text-primary mb-2">Servicio</span>
-          <select
-            value={selectedServiceId}
-            onChange={(event) => setSelectedServiceId(event.target.value)}
-            className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface"
-          >
-            {selectableServices.map((service) => (
-              <option key={service.id} value={service.id}>
-                {service.name}
-              </option>
-            ))}
-          </select>
-        </label>
 
         <div className="flex items-center justify-between gap-3">
           <button
@@ -145,6 +165,86 @@ export default function ShareWeekPreview({ services, appointments, galleryImages
             <span className="material-symbols-outlined text-[22px]">chevron_right</span>
           </button>
         </div>
+
+        <div className="rounded-2xl border border-outline-variant bg-white p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <span className="text-sm font-medium text-primary">Horarios de la placa</span>
+            <button
+              type="button"
+              onClick={resetSlotTimes}
+              className="text-xs font-medium text-on-surface-variant underline"
+            >
+              Restaurar
+            </button>
+          </div>
+
+          <div className="mb-4 flex flex-wrap gap-2">
+            {normalizedSlotTimes.map((time) => (
+              <button
+                key={time}
+                type="button"
+                aria-label={`Quitar ${formatShareTime(time)}`}
+                title={`Quitar ${formatShareTime(time)}`}
+                onClick={() => removeSlotTime(time)}
+                className="inline-flex h-9 items-center gap-2 rounded-full border border-primary-container bg-primary-container px-3 text-sm font-medium text-primary"
+              >
+                <span>{formatShareTime(time)}</span>
+                <span className="material-symbols-outlined text-[16px]">close</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+            <label className="block">
+              <span className="block text-xs font-medium text-on-surface-variant mb-1">Horario</span>
+              <input
+                type="time"
+                step="900"
+                value={newSlotTime}
+                onChange={(event) => {
+                  setNewSlotTime(event.target.value);
+                  setSlotTimeInputError('');
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    addSlotTime();
+                  }
+                }}
+                className="h-11 w-full rounded-xl border border-outline-variant bg-white px-4 text-on-surface focus:border-primary focus:ring-0"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={addSlotTime}
+              className="h-11 self-end rounded-xl bg-secondary-container px-4 text-sm font-medium text-on-secondary-container border border-outline-variant"
+            >
+              Agregar
+            </button>
+            <button
+              type="button"
+              onClick={saveSlotTimes}
+              disabled={savingSlotTimes}
+              className="h-11 self-end rounded-xl bg-primary-dim px-4 text-sm font-medium text-white disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {savingSlotTimes ? 'Guardando...' : 'Guardar'}
+            </button>
+          </div>
+
+          {slotTimeInputError && (
+            <p className="mt-3 text-sm text-error">{slotTimeInputError}</p>
+          )}
+          {slotTimesSaveNotice && (
+            <div role="status" className="mt-3 rounded-xl border border-primary-container bg-primary-container px-4 py-3 text-sm text-primary">
+              {slotTimesSaveNotice}
+            </div>
+          )}
+          {slotTimesSaveError && (
+            <div role="alert" className="mt-3 rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
+              {slotTimesSaveError}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="mx-auto w-full max-w-[360px]">
@@ -169,9 +269,12 @@ export default function ShareWeekPreview({ services, appointments, galleryImages
               <p className="font-serif text-[25px] italic leading-none text-white">de la semana</p>
             </div>
 
-            <div className="flex flex-1 flex-col justify-center gap-4">
+            <div className={`flex flex-1 flex-col justify-center ${hasManySlotTimes ? 'gap-3' : 'gap-4'}`}>
               {weekAvailability.map((day) => (
-                <div key={day.dateKey} className="font-serif text-[21px] leading-[1.16] text-white">
+                <div
+                  key={day.dateKey}
+                  className={`font-serif leading-[1.16] text-white ${hasManySlotTimes ? 'text-[18px]' : 'text-[21px]'}`}
+                >
                   <span>{capitalize(format(day.date, 'EEEE', { locale: es }))}</span>{' '}
                   {day.slots.length > 0 ? (
                     day.slots.map((slot, index) => (

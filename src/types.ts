@@ -50,4 +50,5 @@ export interface StudioSettings {
   depositAmount: number;
   updatedAt: string;
   galleryImages?: GalleryImage[];
+  shareSlotTimes?: string[];
 }

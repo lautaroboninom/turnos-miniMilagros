@@ -49,6 +49,7 @@ service cloud.firestore {
     // Fields:
     //   - depositAmount: number (required)
     //   - galleryImages: list (required) [{src, alt}]
+    //   - shareSlotTimes: list (optional) ['08:00', '10:00', ...]
     //   - updatedAt: string (required)
     // ===============================================================
     
@@ -117,12 +118,17 @@ service cloud.firestore {
     }
 
     function isValidSettings(data) {
-      return data.keys().hasOnly(['depositAmount', 'galleryImages', 'updatedAt']) &&
+      return data.keys().hasOnly(['depositAmount', 'galleryImages', 'shareSlotTimes', 'updatedAt']) &&
         data.depositAmount is number && data.depositAmount >= 0 &&
         data.updatedAt is string &&
         data.galleryImages is list &&
         data.galleryImages.size() > 0 &&
-        data.galleryImages.size() <= 20;
+        data.galleryImages.size() <= 20 &&
+        (!data.keys().hasAny(['shareSlotTimes']) || (
+          data.shareSlotTimes is list &&
+          data.shareSlotTimes.size() > 0 &&
+          data.shareSlotTimes.size() <= 8
+        ));
     }
     
     // ===============================================================

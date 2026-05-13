@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useRef, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import ShareWeekPreview from '../components/ShareWeekPreview';
@@ -14,6 +14,7 @@ import {
   GalleryImage,
   StudioSettings,
 } from '../types';
+import { normalizeShareSlotTimes, SHARE_SLOT_TIMES } from '../lib/availability';
 import { format } from 'date-fns';
 
 const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
@@ -29,6 +30,16 @@ const DEFAULT_EMPLOYEE: Employee = {
   createdAt: '',
   updatedAt: '',
 };
+
+const ADMIN_TABS = [
+  { id: 'turnos', label: 'Turnos' },
+  { id: 'compartir', label: 'Compartir' },
+  { id: 'servicios', label: 'Servicios' },
+  { id: 'empleadas', label: 'Empleadas' },
+  { id: 'config', label: 'Configuracion' },
+] as const;
+
+type AdminTabId = typeof ADMIN_TABS[number]['id'];
 
 type EditingService = Partial<Omit<Service, 'durationMinutes' | 'price'>> & {
   durationMinutes?: string;
@@ -155,6 +166,7 @@ const buildSettingsPayload = (source: StudioSettings): StudioSettings => {
   return {
     depositAmount,
     galleryImages: normalizedGallery.length > 0 ? normalizedGallery : DEFAULT_GALLERY_IMAGES,
+    shareSlotTimes: normalizeShareSlotTimes(source.shareSlotTimes),
     updatedAt: new Date().toISOString(),
   };
 };
@@ -173,6 +185,7 @@ const getSettingsSaveErrorMessage = (error: any) => {
 
 export default function Admin() {
   const navigate = useNavigate();
+  const tabBarRef = useRef<HTMLDivElement | null>(null);
   const [user, setUser] = useState(auth.currentUser);
   const [services, setServices] = useState<Service[]>([]);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
@@ -181,14 +194,18 @@ export default function Admin() {
     depositAmount: 0,
     updatedAt: new Date().toISOString(),
     galleryImages: DEFAULT_GALLERY_IMAGES,
+    shareSlotTimes: [...SHARE_SLOT_TIMES],
   });
-  const [tab, setTab] = useState<'turnos' | 'compartir' | 'servicios' | 'empleadas' | 'config'>('turnos');
+  const [tab, setTab] = useState<AdminTabId>('turnos');
   const [email, setEmail] = useState('milagros@minimilagros.com');
   const [password, setPassword] = useState('');
   const [uploadingGalleryIndex, setUploadingGalleryIndex] = useState<number | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSaveError, setSettingsSaveError] = useState('');
   const [settingsSaveNotice, setSettingsSaveNotice] = useState('');
+  const [savingShareSlotTimes, setSavingShareSlotTimes] = useState(false);
+  const [shareSlotTimesSaveError, setShareSlotTimesSaveError] = useState('');
+  const [shareSlotTimesSaveNotice, setShareSlotTimesSaveNotice] = useState('');
   const [editingEmployeeId, setEditingEmployeeId] = useState<string | null>(null);
   const [employeeNameDraft, setEmployeeNameDraft] = useState('');
   const [savingEmployee, setSavingEmployee] = useState(false);
@@ -199,6 +216,11 @@ export default function Admin() {
     const unsubAuth = auth.onAuthStateChanged(u => setUser(u));
     return () => unsubAuth();
   }, []);
+
+  useEffect(() => {
+    const activeTabButton = tabBarRef.current?.querySelector<HTMLElement>(`[data-admin-tab="${tab}"]`);
+    activeTabButton?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+  }, [tab]);
 
   useEffect(() => {
     if (!user) return;
@@ -261,6 +283,7 @@ export default function Admin() {
         depositAmount: typeof data.depositAmount === 'number' ? data.depositAmount : 0,
         updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : new Date().toISOString(),
         galleryImages: nextGallery.length > 0 ? nextGallery : DEFAULT_GALLERY_IMAGES,
+        shareSlotTimes: normalizeShareSlotTimes(data.shareSlotTimes),
       });
     }, err => handleFirestoreError(err, OperationType.GET, 'settings/global'));
 
@@ -598,6 +621,40 @@ export default function Admin() {
     if (saved) alert('Configuracion guardada');
   };
 
+  const updateShareSlotTimes = (slotTimes: string[]) => {
+    setShareSlotTimesSaveError('');
+    setShareSlotTimesSaveNotice('');
+    setSettingsSaveError('');
+    setSettingsSaveNotice('');
+    setSettings((prev) => ({ ...prev, shareSlotTimes: normalizeShareSlotTimes(slotTimes) }));
+  };
+
+  const saveShareSlotTimes = async (slotTimes: string[]) => {
+    const nextSettings = buildSettingsPayload({
+      ...settings,
+      shareSlotTimes: normalizeShareSlotTimes(slotTimes),
+    });
+
+    try {
+      setSavingShareSlotTimes(true);
+      setShareSlotTimesSaveError('');
+      setShareSlotTimesSaveNotice('');
+      await setDoc(doc(db, 'settings', 'global'), nextSettings);
+      setSettings(nextSettings);
+      setShareSlotTimesSaveNotice('Horarios guardados.');
+    } catch (e: any) {
+      console.error('Share slot times save error', e);
+      setShareSlotTimesSaveError(getSettingsSaveErrorMessage(e));
+      try {
+        handleFirestoreError(e, OperationType.WRITE, 'settings/global');
+      } catch {
+        // Keep the share panel open after logging the Firestore context.
+      }
+    } finally {
+      setSavingShareSlotTimes(false);
+    }
+  };
+
   const updateGalleryImage = (index: number, key: keyof GalleryImage, value: string) => {
     setSettingsSaveError('');
     setSettingsSaveNotice('');
@@ -741,6 +798,12 @@ export default function Admin() {
     }
   };
 
+  const goToAdjacentTab = (direction: -1 | 1) => {
+    const currentIndex = ADMIN_TABS.findIndex((adminTab) => adminTab.id === tab);
+    const nextIndex = (currentIndex + direction + ADMIN_TABS.length) % ADMIN_TABS.length;
+    setTab(ADMIN_TABS[nextIndex].id);
+  };
+
   if (!user) {
     return (
       <Layout>
@@ -768,22 +831,40 @@ export default function Admin() {
         </div>
       </div>
 
-      <div className="flex gap-4 mb-8 overflow-x-auto pb-2 no-scrollbar">
-        <button onClick={() => setTab('turnos')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'turnos' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
-          Turnos
-        </button>
-        <button onClick={() => setTab('compartir')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'compartir' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
-          Compartir
-        </button>
-        <button onClick={() => setTab('servicios')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'servicios' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
-          Servicios
-        </button>
-        <button onClick={() => setTab('empleadas')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'empleadas' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
-          Empleadas
-        </button>
-        <button onClick={() => setTab('config')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === 'config' ? 'bg-primary-container text-primary shadow-sm' : 'bg-white border border-outline-variant text-on-surface-variant'}`}>
-          Configuracion
-        </button>
+      <div className="mb-8 rounded-[18px] border border-outline-variant bg-white p-2 shadow-sm">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-label="Pestana anterior"
+            title="Pestana anterior"
+            onClick={() => goToAdjacentTab(-1)}
+            className="h-10 w-10 shrink-0 rounded-xl border border-outline-variant bg-background text-primary flex items-center justify-center"
+          >
+            <span className="material-symbols-outlined text-[22px]">chevron_left</span>
+          </button>
+          <div ref={tabBarRef} className="flex min-w-0 flex-1 gap-2 overflow-x-auto scroll-smooth no-scrollbar">
+            {ADMIN_TABS.map((adminTab) => (
+              <button
+                key={adminTab.id}
+                type="button"
+                data-admin-tab={adminTab.id}
+                onClick={() => setTab(adminTab.id)}
+                className={`px-4 py-2 rounded-full text-sm font-medium transition-all whitespace-nowrap ${tab === adminTab.id ? 'bg-primary-container text-primary shadow-sm' : 'bg-background border border-outline-variant text-on-surface-variant'}`}
+              >
+                {adminTab.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            aria-label="Pestana siguiente"
+            title="Pestana siguiente"
+            onClick={() => goToAdjacentTab(1)}
+            className="h-10 w-10 shrink-0 rounded-xl border border-outline-variant bg-background text-primary flex items-center justify-center"
+          >
+            <span className="material-symbols-outlined text-[22px]">chevron_right</span>
+          </button>
+        </div>
       </div>
 
       {tab === 'compartir' && (
@@ -791,6 +872,12 @@ export default function Admin() {
           services={services}
           appointments={appointments}
           galleryImages={settings.galleryImages}
+          slotTimes={settings.shareSlotTimes}
+          onSlotTimesChange={updateShareSlotTimes}
+          onSaveSlotTimes={saveShareSlotTimes}
+          savingSlotTimes={savingShareSlotTimes}
+          slotTimesSaveNotice={shareSlotTimesSaveNotice}
+          slotTimesSaveError={shareSlotTimesSaveError}
         />
       )}
 
