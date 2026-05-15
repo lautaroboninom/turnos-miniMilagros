@@ -43,26 +43,6 @@ const buildWhatsAppRedirectUrl = (phone: string, text: string) => {
   return `/redirigir-whatsapp?${search.toString()}`;
 };
 
-const openPendingWhatsAppWindow = () => {
-  if (typeof window === 'undefined') return null;
-
-  const nextWindow = window.open('', '_blank');
-  if (!nextWindow) return null;
-
-  nextWindow.opener = null;
-  nextWindow.document.title = 'Abriendo WhatsApp';
-  nextWindow.document.body.style.margin = '0';
-  nextWindow.document.body.style.fontFamily = 'Arial, sans-serif';
-  nextWindow.document.body.style.background = '#fff7f7';
-  nextWindow.document.body.style.color = '#7d5050';
-  nextWindow.document.body.style.display = 'flex';
-  nextWindow.document.body.style.alignItems = 'center';
-  nextWindow.document.body.style.justifyContent = 'center';
-  nextWindow.document.body.innerHTML = '<div style="padding:24px;text-align:center;max-width:320px;"><h1 style="font-size:20px;margin:0 0 12px;">Estamos preparando tu WhatsApp</h1><p style="margin:0;font-size:14px;line-height:1.5;">Guardando el turno y armando el mensaje para MiniMilagros.</p></div>';
-
-  return nextWindow;
-};
-
 export default function Booking() {
   const { serviceId } = useParams();
   const navigate = useNavigate();
@@ -159,7 +139,6 @@ export default function Booking() {
       settings.depositAmount,
     );
     const redirectUrl = buildWhatsAppRedirectUrl(WHATSAPP_PHONE, message);
-    const pendingWhatsAppWindow = openPendingWhatsAppWindow();
 
     setBooking(true);
 
@@ -188,17 +167,9 @@ export default function Booking() {
       };
 
       await savePublicPendingAppointment(newAppointment, RESERVATION_SAVE_TIMEOUT_MS);
-
-      if (!pendingWhatsAppWindow || pendingWhatsAppWindow.closed) {
-        window.location.assign(redirectUrl);
-        return;
-      }
-
-      pendingWhatsAppWindow.location.replace(redirectUrl);
-      navigate('/', { replace: true });
+      window.location.assign(redirectUrl);
     } catch (error) {
-      pendingWhatsAppWindow?.close();
-      alert('No se pudo guardar el turno. No abrimos WhatsApp para evitar reservas sin registrar. Revisa la conexion e intenta nuevamente.');
+      alert('No se pudo guardar el turno. Revisa la conexion e intenta nuevamente.');
       try {
         handleFirestoreError(error, OperationType.CREATE, 'appointments');
       } catch {

@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
-import { collection, doc, getFirestore, setDoc } from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 import type { Appointment } from './types';
@@ -70,10 +70,16 @@ const toFirestoreValue = (value: unknown): Record<string, unknown> => {
   }
 };
 
-const savePendingAppointmentWithRest = async (
-  appointment: PendingAppointmentPayload,
-  documentId: string,
-) => {
+const buildPublicAppointmentDocumentId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `appt-${crypto.randomUUID().replace(/-/g, '')}`;
+  }
+
+  return `appt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const savePendingAppointmentWithRest = async (appointment: PendingAppointmentPayload) => {
+  const documentId = buildPublicAppointmentDocumentId();
   const endpoint = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/${APPOINTMENTS_COLLECTION}/${documentId}?key=${firebaseConfig.apiKey}`;
   const response = await fetch(endpoint, {
     method: 'PATCH',
@@ -93,32 +99,23 @@ const savePendingAppointmentWithRest = async (
     throw new Error(`firestore-rest-error:${response.status}:${errorText}`);
   }
 
-  return response.json();
+  return {
+    id: documentId,
+    payload: await response.json(),
+  };
 };
 
 export const savePublicPendingAppointment = async (
   appointment: PendingAppointmentPayload,
   timeoutMs = 8000,
 ) => {
-  const appointmentRef = doc(collection(db, APPOINTMENTS_COLLECTION));
-  const appointmentId = appointmentRef.id;
+  const result = await withTimeout(
+    savePendingAppointmentWithRest(appointment),
+    timeoutMs,
+    'firestore-rest-timeout',
+  );
 
-  try {
-    await withTimeout(
-      setDoc(appointmentRef, appointment),
-      timeoutMs,
-      'firestore-sdk-timeout',
-    );
-    return { method: 'sdk' as const, id: appointmentId };
-  } catch (sdkError) {
-    console.warn('Falling back to Firestore REST appointment save', sdkError);
-    await withTimeout(
-      savePendingAppointmentWithRest(appointment, appointmentId),
-      timeoutMs,
-      'firestore-rest-timeout',
-    );
-    return { method: 'rest' as const, id: appointmentId };
-  }
+  return { method: 'rest' as const, id: result.id };
 };
 
 export const loginWithEmail = async (email: string, pass: string) => {
