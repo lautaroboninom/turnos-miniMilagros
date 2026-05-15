@@ -2,16 +2,16 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { addDays, addMinutes, format, getDay, parse } from 'date-fns';
 import { es } from 'date-fns/locale';
-import { addDoc, collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
+import { doc, getDoc, getDocs, query, where, collection } from 'firebase/firestore';
 import Layout from '../components/Layout';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { db, handleFirestoreError, OperationType, savePublicPendingAppointment } from '../firebase';
 import { getAvailableSlotsForDate, type AvailabilityAppointment } from '../lib/availability';
-import { DEFAULT_EMPLOYEE_ID, DEFAULT_EMPLOYEE_NAME, type Service, type StudioSettings } from '../types';
+import { DEFAULT_EMPLOYEE_ID, DEFAULT_EMPLOYEE_NAME, type Appointment, type Service, type StudioSettings } from '../types';
 
 const getServiceEmployeeId = (service: Service) => service.employeeId?.trim() || DEFAULT_EMPLOYEE_ID;
 const getServiceEmployeeName = (service: Service) => service.employeeName?.trim() || DEFAULT_EMPLOYEE_NAME;
 const WHATSAPP_PHONE = '5491139244063';
-const RESERVATION_SAVE_TIMEOUT_MS = 12000;
+const RESERVATION_SAVE_TIMEOUT_MS = 8000;
 
 const buildReservationMessage = (
   firstName: string,
@@ -43,23 +43,24 @@ const buildWhatsAppRedirectUrl = (phone: string, text: string) => {
   return `/redirigir-whatsapp?${search.toString()}`;
 };
 
-const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string) => {
-  let timeoutId: number | undefined;
+const openPendingWhatsAppWindow = () => {
+  if (typeof window === 'undefined') return null;
 
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timeoutId = window.setTimeout(() => {
-          reject(new Error(timeoutMessage));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutId != null) {
-      window.clearTimeout(timeoutId);
-    }
-  }
+  const nextWindow = window.open('', '_blank');
+  if (!nextWindow) return null;
+
+  nextWindow.opener = null;
+  nextWindow.document.title = 'Abriendo WhatsApp';
+  nextWindow.document.body.style.margin = '0';
+  nextWindow.document.body.style.fontFamily = 'Arial, sans-serif';
+  nextWindow.document.body.style.background = '#fff7f7';
+  nextWindow.document.body.style.color = '#7d5050';
+  nextWindow.document.body.style.display = 'flex';
+  nextWindow.document.body.style.alignItems = 'center';
+  nextWindow.document.body.style.justifyContent = 'center';
+  nextWindow.document.body.innerHTML = '<div style="padding:24px;text-align:center;max-width:320px;"><h1 style="font-size:20px;margin:0 0 12px;">Estamos preparando tu WhatsApp</h1><p style="margin:0;font-size:14px;line-height:1.5;">Guardando el turno y armando el mensaje para MiniMilagros.</p></div>';
+
+  return nextWindow;
 };
 
 export default function Booking() {
@@ -158,9 +159,7 @@ export default function Booking() {
       settings.depositAmount,
     );
     const redirectUrl = buildWhatsAppRedirectUrl(WHATSAPP_PHONE, message);
-    const openedWhatsAppWindow = typeof window !== 'undefined'
-      ? window.open(redirectUrl, '_blank', 'noopener,noreferrer')
-      : null;
+    const pendingWhatsAppWindow = openPendingWhatsAppWindow();
 
     setBooking(true);
 
@@ -171,7 +170,7 @@ export default function Booking() {
       const employeeId = getServiceEmployeeId(service);
       const employeeName = getServiceEmployeeName(service);
 
-      const newAppointment = {
+      const newAppointment: Omit<Appointment, 'id'> & { status: 'pending' } = {
         serviceId: service.id,
         serviceName: service.name,
         employeeId,
@@ -188,28 +187,23 @@ export default function Booking() {
         createdAt: new Date().toISOString(),
       };
 
-      await withTimeout(
-        addDoc(collection(db, 'appointments'), newAppointment),
-        RESERVATION_SAVE_TIMEOUT_MS,
-        'reservation-save-timeout',
-      );
+      await savePublicPendingAppointment(newAppointment, RESERVATION_SAVE_TIMEOUT_MS);
 
-      if (!openedWhatsAppWindow) {
+      if (!pendingWhatsAppWindow || pendingWhatsAppWindow.closed) {
         window.location.assign(redirectUrl);
         return;
       }
 
+      pendingWhatsAppWindow.location.replace(redirectUrl);
       navigate('/', { replace: true });
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-
-      if (errorMessage === 'reservation-save-timeout') {
-        setBooking(false);
-        alert('WhatsApp se intento abrir, pero el guardado del turno demoro demasiado. Revisa la conexion y valida luego el turno en el panel admin.');
-        return;
+      pendingWhatsAppWindow?.close();
+      alert('No se pudo guardar el turno. No abrimos WhatsApp para evitar reservas sin registrar. Revisa la conexion e intenta nuevamente.');
+      try {
+        handleFirestoreError(error, OperationType.CREATE, 'appointments');
+      } catch {
+        // Keep the booking screen usable after logging the error context.
       }
-
-      handleFirestoreError(error, OperationType.CREATE, 'appointments');
     } finally {
       setBooking(false);
     }
