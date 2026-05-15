@@ -12,19 +12,34 @@ const getServiceEmployeeId = (service: Service) => service.employeeId?.trim() ||
 const getServiceEmployeeName = (service: Service) => service.employeeName?.trim() || DEFAULT_EMPLOYEE_NAME;
 const WHATSAPP_PHONE = '5491139244063';
 
-const buildWhatsAppUrl = (message: string) => (
-  `https://api.whatsapp.com/send/?phone=${WHATSAPP_PHONE}&text=${encodeURIComponent(message)}&type=phone_number&app_absent=0`
+const buildReservationMessage = (
+  firstName: string,
+  lastName: string,
+  service: Service,
+  prettyDate: string,
+  selectedTime: string,
+  depositAmount: number,
+) => (
+  [
+    'Hola MiniMilagros! Te llego una nueva reserva.',
+    '',
+    `Cliente: ${firstName.trim()} ${lastName.trim()}`,
+    `Servicio: ${service.name}`,
+    `Fecha: ${prettyDate}`,
+    `Horario: ${selectedTime} hs`,
+    `Duracion: ${service.durationMinutes} min`,
+    `Total: $${service.price}`,
+    `Sena sugerida: $${depositAmount}`,
+  ].join('\n')
 );
 
-const openDeferredWindow = () => {
-  if (typeof window === 'undefined') return null;
+const buildWhatsAppRedirectUrl = (phone: string, text: string) => {
+  const search = new URLSearchParams({
+    phone,
+    text,
+  });
 
-  const nextWindow = window.open('', '_blank');
-  if (nextWindow) {
-    nextWindow.opener = null;
-  }
-
-  return nextWindow;
+  return `/redirigir-whatsapp?${search.toString()}`;
 };
 
 export default function Booking() {
@@ -113,7 +128,6 @@ export default function Booking() {
     if (!service || !selectedTime || !firstName || !lastName || !settings) return;
 
     setBooking(true);
-    const pendingWhatsAppWindow = openDeferredWindow();
 
     try {
       const dateStr = format(selectedDate, 'yyyy-MM-dd');
@@ -143,18 +157,18 @@ export default function Booking() {
       await addDoc(collection(db, 'appointments'), newAppointment);
 
       const prettyDate = format(selectedDate, "eeee d 'de' MMMM", { locale: es });
-      const message = `Hola MiniMilagros! Soy ${firstName.trim()} ${lastName.trim()}, reserve un turno de ${service.name} para el ${prettyDate} a las ${selectedTime} hs. El total es $${service.price}. Adjunto el comprobante de sena por $${settings.depositAmount}.`;
-      const whatsappUrl = buildWhatsAppUrl(message);
+      const message = buildReservationMessage(
+        firstName,
+        lastName,
+        service,
+        prettyDate,
+        selectedTime,
+        settings.depositAmount,
+      );
+      const redirectUrl = buildWhatsAppRedirectUrl(WHATSAPP_PHONE, message);
 
-      if (pendingWhatsAppWindow && !pendingWhatsAppWindow.closed) {
-        pendingWhatsAppWindow.location.href = whatsappUrl;
-        navigate('/', { replace: true });
-        return;
-      }
-
-      window.location.assign(whatsappUrl);
+      window.location.assign(redirectUrl);
     } catch (error) {
-      pendingWhatsAppWindow?.close();
       handleFirestoreError(error, OperationType.CREATE, 'appointments');
     } finally {
       setBooking(false);
