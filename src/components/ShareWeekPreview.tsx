@@ -56,10 +56,14 @@ const getBackgroundImage = (
 );
 
 const getSlotClassName = (status: ShareSlotStatus) => (
-  status === 'unavailable'
-    ? 'relative inline-block text-white/45 line-through decoration-[#ffd6df] decoration-[2px] decoration-solid'
-    : 'relative inline-block text-white'
+  status === 'free'
+    ? 'text-white'
+    : status === 'booked'
+      ? 'text-white/95'
+      : 'text-white/45'
 );
+
+const shouldRenderBookedStrike = (status: ShareSlotStatus) => status === 'booked';
 
 export default function ShareWeekPreview({
   services,
@@ -280,8 +284,16 @@ export default function ShareWeekPreview({
                     day.slots.map((slot, index) => (
                       <span key={slot.time}>
                         {index > 0 && <span className="mx-1 text-white/80">/</span>}
-                        <span className={getSlotClassName(slot.status)}>
-                          {formatShareTime(slot.time)}
+                        <span className="relative inline-flex items-center">
+                          {shouldRenderBookedStrike(slot.status) && (
+                            <span
+                              aria-hidden="true"
+                              className="pointer-events-none absolute left-[-3px] right-[-3px] top-1/2 h-[2px] -translate-y-1/2 rotate-[-9deg] rounded-full bg-[#ffd6df] shadow-[0_0_8px_rgba(255,214,223,0.55)]"
+                            />
+                          )}
+                          <span className={getSlotClassName(slot.status)}>
+                            {formatShareTime(slot.time)}
+                          </span>
                         </span>
                       </span>
                     ))

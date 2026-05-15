@@ -1,31 +1,44 @@
-import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { addDays, addMinutes, format, getDay, parse } from 'date-fns';
+import { es } from 'date-fns/locale';
+import { addDoc, collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
 import Layout from '../components/Layout';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { doc, getDoc, collection, query, where, getDocs, addDoc } from 'firebase/firestore';
-import { DEFAULT_EMPLOYEE_ID, DEFAULT_EMPLOYEE_NAME, Service, StudioSettings } from '../types';
-import { format, addMinutes, parse, addDays, getDay } from 'date-fns';
-import { es } from 'date-fns/locale';
 import { getAvailableSlotsForDate, type AvailabilityAppointment } from '../lib/availability';
+import { DEFAULT_EMPLOYEE_ID, DEFAULT_EMPLOYEE_NAME, type Service, type StudioSettings } from '../types';
 
 const getServiceEmployeeId = (service: Service) => service.employeeId?.trim() || DEFAULT_EMPLOYEE_ID;
 const getServiceEmployeeName = (service: Service) => service.employeeName?.trim() || DEFAULT_EMPLOYEE_NAME;
+const WHATSAPP_PHONE = '5491139244063';
+
+const buildWhatsAppUrl = (message: string) => (
+  `https://api.whatsapp.com/send/?phone=${WHATSAPP_PHONE}&text=${encodeURIComponent(message)}&type=phone_number&app_absent=0`
+);
+
+const openDeferredWindow = () => {
+  if (typeof window === 'undefined') return null;
+
+  const nextWindow = window.open('', '_blank');
+  if (nextWindow) {
+    nextWindow.opener = null;
+  }
+
+  return nextWindow;
+};
 
 export default function Booking() {
   const { serviceId } = useParams();
   const navigate = useNavigate();
-  
+
   const [service, setService] = useState<Service | null>(null);
   const [settings, setSettings] = useState<StudioSettings | null>(null);
-  
   const [step, setStep] = useState(1);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
   const [availableSlots, setAvailableSlots] = useState<string[]>([]);
-  
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
-
   const [loading, setLoading] = useState(true);
   const [booking, setBooking] = useState(false);
 
@@ -33,77 +46,75 @@ export default function Booking() {
     async function fetchData() {
       try {
         if (!serviceId) return;
-        
-        // Fetch Service
+
         const serviceSnap = await getDoc(doc(db, 'services', serviceId));
         if (serviceSnap.exists()) {
           setService({ id: serviceSnap.id, ...serviceSnap.data() } as Service);
         }
 
-        // Fetch Settings (for deposit)
         const settingsSnap = await getDoc(doc(db, 'settings', 'global'));
         if (settingsSnap.exists()) {
           setSettings(settingsSnap.data() as StudioSettings);
         } else {
-          setSettings({ depositAmount: 5000, updatedAt: new Date().toISOString() }); // Fallback
+          setSettings({ depositAmount: 5000, updatedAt: new Date().toISOString() });
         }
       } catch (error) {
-         handleFirestoreError(error, OperationType.GET, 'services/settings');
+        handleFirestoreError(error, OperationType.GET, 'services/settings');
       } finally {
         setLoading(false);
       }
     }
-    fetchData();
+
+    void fetchData();
   }, [serviceId]);
 
   useEffect(() => {
-    if (!service || !selectedDate) return;
-    
-    // Generate slots based on logic (08:00 to 19:00 Mon-Sat)
+    if (!service) return;
+
     async function generateSlots() {
-      const dayOfWeek = getDay(selectedDate);
-      if (dayOfWeek === 0) { // Sunday
+      if (getDay(selectedDate) === 0) {
         setAvailableSlots([]);
         return;
       }
 
       const dateStr = format(selectedDate, 'yyyy-MM-dd');
       const serviceEmployeeId = getServiceEmployeeId(service);
-      
-      // Fetch appointments for this day
+
       try {
-        const q = query(collection(db, 'appointments'), where('date', '==', dateStr), where('status', 'in', ['pending', 'confirmed']));
-        const snap = await getDocs(q);
-        
+        const appointmentsQuery = query(
+          collection(db, 'appointments'),
+          where('date', '==', dateStr),
+          where('status', 'in', ['pending', 'confirmed']),
+        );
+        const snap = await getDocs(appointmentsQuery);
+
         const relevantAppointments = snap.docs
-          .map(d => d.data() as AvailabilityAppointment & { employeeId?: string })
-          .filter(data => {
-            const appointmentEmployeeId = typeof data.employeeId === 'string' && data.employeeId.trim()
-              ? data.employeeId.trim()
+          .map((entry) => entry.data() as AvailabilityAppointment & { employeeId?: string })
+          .filter((appointment) => {
+            const appointmentEmployeeId = typeof appointment.employeeId === 'string' && appointment.employeeId.trim()
+              ? appointment.employeeId.trim()
               : DEFAULT_EMPLOYEE_ID;
+
             return appointmentEmployeeId === serviceEmployeeId;
           });
 
-        const slots = getAvailableSlotsForDate(
-          selectedDate,
-          service.durationMinutes,
-          relevantAppointments
+        setAvailableSlots(
+          getAvailableSlotsForDate(selectedDate, service.durationMinutes, relevantAppointments),
         );
-        
-        setAvailableSlots(slots);
       } catch (error) {
         handleFirestoreError(error, OperationType.GET, 'appointments');
       }
     }
-    
-    generateSlots();
-  }, [selectedDate, service]);
 
+    void generateSlots();
+  }, [selectedDate, service]);
 
   const handleConfirm = async () => {
     if (!service || !selectedTime || !firstName || !lastName || !settings) return;
+
     setBooking(true);
-    
+    const pendingWhatsAppWindow = openDeferredWindow();
+
     try {
       const dateStr = format(selectedDate, 'yyyy-MM-dd');
       const timeParsed = parse(selectedTime, 'HH:mm', selectedDate);
@@ -111,8 +122,8 @@ export default function Booking() {
       const endTimeStr = format(endTimeParsed, 'HH:mm');
       const employeeId = getServiceEmployeeId(service);
       const employeeName = getServiceEmployeeName(service);
-      
-      const newAppt = {
+
+      const newAppointment = {
         serviceId: service.id,
         serviceName: service.name,
         employeeId,
@@ -122,163 +133,173 @@ export default function Booking() {
         date: dateStr,
         startTime: selectedTime,
         endTime: endTimeStr,
-        clientFirstName: firstName,
-        clientLastName: lastName,
-        status: 'pending',
+        clientFirstName: firstName.trim(),
+        clientLastName: lastName.trim(),
+        status: 'pending' as const,
         depositAmount: settings.depositAmount,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
       };
-      
-      await addDoc(collection(db, 'appointments'), newAppt);
-      
-      // WhatsApp redirect
+
+      await addDoc(collection(db, 'appointments'), newAppointment);
+
       const prettyDate = format(selectedDate, "eeee d 'de' MMMM", { locale: es });
-      const encodedMsg = encodeURIComponent(`¡Hola MiniMilagros! Soy ${firstName} ${lastName}, reservé un turno de ${service.name} para el ${prettyDate} a las ${selectedTime} hs. El total es $${service.price}. Adjunto el comprobante de seña por $${settings.depositAmount}.`);
-      
-      window.location.href = `https://wa.me/5491139244063?text=${encodedMsg}`;
-      
-    } catch (e) {
-       handleFirestoreError(e, OperationType.CREATE, 'appointments');
+      const message = `Hola MiniMilagros! Soy ${firstName.trim()} ${lastName.trim()}, reserve un turno de ${service.name} para el ${prettyDate} a las ${selectedTime} hs. El total es $${service.price}. Adjunto el comprobante de sena por $${settings.depositAmount}.`;
+      const whatsappUrl = buildWhatsAppUrl(message);
+
+      if (pendingWhatsAppWindow && !pendingWhatsAppWindow.closed) {
+        pendingWhatsAppWindow.location.href = whatsappUrl;
+        navigate('/', { replace: true });
+        return;
+      }
+
+      window.location.assign(whatsappUrl);
+    } catch (error) {
+      pendingWhatsAppWindow?.close();
+      handleFirestoreError(error, OperationType.CREATE, 'appointments');
     } finally {
       setBooking(false);
     }
   };
 
-  if (loading) return <Layout><p>Cargando details...</p></Layout>;
+  if (loading) return <Layout><p>Cargando detalles...</p></Layout>;
   if (!service) return <Layout><p>Servicio no encontrado.</p></Layout>;
 
   return (
     <Layout>
       <div className="mb-6">
-        <div className="h-[2px] bg-outline-variant flex justify-between relative">
-          <div className={`h-[2px] bg-primary-dim absolute left-0 transition-all ${step === 1 ? 'w-[33%]' : 'w-[66%]'}`}></div>
+        <div className="relative flex justify-between bg-outline-variant h-[2px]">
+          <div className={`absolute left-0 h-[2px] bg-primary-dim transition-all ${step === 1 ? 'w-[33%]' : 'w-[66%]'}`} />
         </div>
-        <div className="flex justify-between mt-2 px-1">
-          <span className="text-[10px] uppercase font-bold text-primary-dim">Servicio</span>
-          <span className={`text-[10px] uppercase font-bold ${step === 1 ? 'text-on-surface-variant' : 'text-primary-dim'}`}>Fecha</span>
-          <span className="text-[10px] uppercase font-bold text-on-surface-variant">Confirmar</span>
+        <div className="mt-2 flex justify-between px-1">
+          <span className="text-[10px] font-bold uppercase text-primary-dim">Servicio</span>
+          <span className={`text-[10px] font-bold uppercase ${step === 1 ? 'text-on-surface-variant' : 'text-primary-dim'}`}>Fecha</span>
+          <span className="text-[10px] font-bold uppercase text-on-surface-variant">Confirmar</span>
         </div>
       </div>
 
-      <button onClick={() => step > 1 ? setStep(step - 1) : navigate('/')} className="text-on-surface-variant mb-6 flex items-center text-[11px] uppercase tracking-widest font-bold">
-        <span className="material-symbols-outlined text-sm mr-1">arrow_back</span>
+      <button
+        onClick={() => (step > 1 ? setStep(step - 1) : navigate('/'))}
+        className="mb-6 flex items-center text-[11px] font-bold uppercase tracking-widest text-on-surface-variant"
+      >
+        <span className="material-symbols-outlined mr-1 text-sm">arrow_back</span>
         Volver
       </button>
 
       {step === 1 && (
         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-           <h1 className="text-3xl font-serif text-primary mb-2">Seleccioná fecha y hora</h1>
-           <p className="text-on-surface-variant font-light mb-8">Estás agendando <strong className="font-serif">"{service.name}"</strong> ({service.durationMinutes} min)</p>
-           
-           <div className="bg-surface-container-lowest p-6 rounded-2xl shadow-[0_20px_40px_rgba(136,79,80,0.05)] mb-8">
-             {/* Simple Calendar Strip */}
-             <div className="flex overflow-x-auto gap-3 pb-4 no-scrollbar">
-                {[...Array(14)].map((_, i) => {
-                  const d = addDays(new Date(), i);
-                  const isSelected = format(d, 'yyyy-MM-dd') === format(selectedDate, 'yyyy-MM-dd');
-                  const isSun = getDay(d) === 0;
-                  return (
-                    <button 
-                      key={i} 
-                      onClick={() => !isSun && setSelectedDate(d)}
-                      disabled={isSun}
-                      className={`flex flex-col items-center min-w-[4rem] p-3 rounded-xl transition-all ${isSelected ? 'bg-primary-container text-on-primary-container shadow-inner' : isSun ? 'opacity-30 cursor-not-allowed' : 'bg-surface-container-low hover:bg-surface-container'} `}
-                    >
-                      <span className="text-xs uppercase tracking-widest">{format(d, 'eee', {locale: es})}</span>
-                      <span className="text-xl font-serif mt-1">{format(d, 'd')}</span>
-                    </button>
-                  )
-                })}
-             </div>
+          <h1 className="mb-2 text-3xl font-serif text-primary">Selecciona fecha y hora</h1>
+          <p className="mb-8 font-light text-on-surface-variant">
+            Estas agendando <strong className="font-serif">"{service.name}"</strong> ({service.durationMinutes} min)
+          </p>
 
-             <div className="mt-6 border-t border-primary-container pt-6">
-                <h3 className="font-serif text-[18px] mb-4 text-primary">Horarios Disponibles</h3>
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                  {availableSlots.length > 0 ? availableSlots.map(time => (
-                    <button
-                      key={time}
-                      onClick={() => setSelectedTime(time)}
-                      className={`p-3 rounded-xl text-sm font-medium transition-all border ${selectedTime === time ? 'bg-primary-dim text-white border-primary-dim shadow-[0_4px_12px_rgba(232,160,160,0.3)]' : 'bg-surface-bright border-outline-variant hover:border-primary-dim'}`}
-                    >
-                      {time}
-                    </button>
-                  )) : (
-                    <p className="col-span-full text-on-surface-variant text-sm py-4">No hay turnos disponibles este día.</p>
-                  )}
-                </div>
-             </div>
-           </div>
+          <div className="mb-8 rounded-2xl bg-surface-container-lowest p-6 shadow-[0_20px_40px_rgba(136,79,80,0.05)]">
+            <div className="flex gap-3 overflow-x-auto pb-4 no-scrollbar">
+              {[...Array(14)].map((_, index) => {
+                const date = addDays(new Date(), index);
+                const isSelected = format(date, 'yyyy-MM-dd') === format(selectedDate, 'yyyy-MM-dd');
+                const isSunday = getDay(date) === 0;
 
-           <button 
-             disabled={!selectedTime}
-             onClick={() => setStep(2)}
-             className="w-full bg-primary-dim text-white py-4 px-8 rounded-xl text-[15px] font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-           >
-             Agendar Turno
-           </button>
+                return (
+                  <button
+                    key={index}
+                    onClick={() => !isSunday && setSelectedDate(date)}
+                    disabled={isSunday}
+                    className={`flex min-w-[4rem] flex-col items-center rounded-xl p-3 transition-all ${isSelected ? 'bg-primary-container text-on-primary-container shadow-inner' : isSunday ? 'cursor-not-allowed opacity-30' : 'bg-surface-container-low hover:bg-surface-container'}`}
+                  >
+                    <span className="text-xs uppercase tracking-widest">{format(date, 'eee', { locale: es })}</span>
+                    <span className="mt-1 text-xl font-serif">{format(date, 'd')}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-6 border-t border-primary-container pt-6">
+              <h3 className="mb-4 text-[18px] font-serif text-primary">Horarios disponibles</h3>
+              <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
+                {availableSlots.length > 0 ? availableSlots.map((time) => (
+                  <button
+                    key={time}
+                    onClick={() => setSelectedTime(time)}
+                    className={`rounded-xl border p-3 text-sm font-medium transition-all ${selectedTime === time ? 'border-primary-dim bg-primary-dim text-white shadow-[0_4px_12px_rgba(232,160,160,0.3)]' : 'border-outline-variant bg-surface-bright hover:border-primary-dim'}`}
+                  >
+                    {time}
+                  </button>
+                )) : (
+                  <p className="col-span-full py-4 text-sm text-on-surface-variant">No hay turnos disponibles este dia.</p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <button
+            disabled={!selectedTime}
+            onClick={() => setStep(2)}
+            className="w-full rounded-xl bg-primary-dim px-8 py-4 text-[15px] font-semibold text-white transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Agendar turno
+          </button>
         </div>
       )}
 
       {step === 2 && (
         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-           <h1 className="text-3xl font-serif text-primary mb-2">Resumen de Turno</h1>
-           <p className="text-on-surface-variant font-light mb-8">Por favor, revisá los detalles y completá tus datos.</p>
+          <h1 className="mb-2 text-3xl font-serif text-primary">Resumen de turno</h1>
+          <p className="mb-8 font-light text-on-surface-variant">Por favor, revisa los detalles y completa tus datos.</p>
 
-           <div className="bg-background border border-primary-container p-6 rounded-[16px] shadow-sm mb-8 space-y-4 relative overflow-hidden">
-             
-             <div className="flex justify-between items-center border-b border-primary-container pb-4 relative z-10">
-               <div>
-                  <p className="text-[12px] text-on-surface-variant mb-1">Servicio</p>
-                  <p className="font-sans font-medium text-[15px] text-primary">{service.name}</p>
-                  <p className="text-on-surface-variant text-[12px] mt-1">Atiende: {getServiceEmployeeName(service)}</p>
-               </div>
-               <p className="font-bold text-[14px] text-primary">${service.price}</p>
-             </div>
-
-             <div className="flex justify-between items-center pb-4 relative z-10">
-               <div>
-                  <p className="text-[12px] text-on-surface-variant mb-1">Fecha y Hora</p>
-                  <p className="text-on-surface text-[14px]">{format(selectedDate, "eeee d 'de' MMMM", { locale: es })}</p>
-                  <p className="text-on-surface-variant text-[12px] mt-1">{selectedTime} hs • {service.durationMinutes} min</p>
-               </div>
-             </div>
-
-             <div className="bg-primary-container text-on-primary-container p-4 rounded-xl text-sm mt-4 relative z-10">
-                Seña sugerida: <strong>${settings?.depositAmount}</strong> al Alias: bichito.21
-             </div>
-           </div>
-
-           <div className="mb-8 space-y-4">
+          <div className="relative mb-8 space-y-4 overflow-hidden rounded-[16px] border border-primary-container bg-background p-6 shadow-sm">
+            <div className="relative z-10 flex items-center justify-between border-b border-primary-container pb-4">
               <div>
-                <label className="block tracking-wide text-xs font-semibold text-on-surface-variant uppercase mb-1">Nombre</label>
-                <input 
-                  type="text" 
-                  value={firstName} 
-                  onChange={e => setFirstName(e.target.value)}
-                  className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface transition-colors"
-                  placeholder="Tu nombre"
-                />
+                <p className="mb-1 text-[12px] text-on-surface-variant">Servicio</p>
+                <p className="text-[15px] font-medium text-primary">{service.name}</p>
+                <p className="mt-1 text-[12px] text-on-surface-variant">Atiende: {getServiceEmployeeName(service)}</p>
               </div>
-              <div>
-                <label className="block tracking-wide text-xs font-semibold text-on-surface-variant uppercase mb-1">Apellido</label>
-                <input 
-                  type="text" 
-                  value={lastName} 
-                  onChange={e => setLastName(e.target.value)}
-                  className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface transition-colors"
-                  placeholder="Tu apellido"
-                />
-              </div>
-           </div>
+              <p className="text-[14px] font-bold text-primary">${service.price}</p>
+            </div>
 
-           <button 
-             disabled={!firstName || !lastName || booking}
-             onClick={handleConfirm}
-             className="w-full bg-primary-dim text-white py-4 px-8 rounded-xl text-[15px] font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
-           >
-             {booking ? 'Confirmando...' : 'Confirmar y enviar WhatsApp'}
-             <span className="material-symbols-outlined text-[20px]">send</span>
-           </button>
+            <div className="relative z-10 flex items-center justify-between pb-4">
+              <div>
+                <p className="mb-1 text-[12px] text-on-surface-variant">Fecha y hora</p>
+                <p className="text-[14px] text-on-surface">{format(selectedDate, "eeee d 'de' MMMM", { locale: es })}</p>
+                <p className="mt-1 text-[12px] text-on-surface-variant">{selectedTime} hs - {service.durationMinutes} min</p>
+              </div>
+            </div>
+
+            <div className="relative z-10 mt-4 rounded-xl bg-primary-container p-4 text-sm text-on-primary-container">
+              Sena sugerida: <strong>${settings.depositAmount}</strong> al Alias: bichito.21
+            </div>
+          </div>
+
+          <div className="mb-8 space-y-4">
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">Nombre</label>
+              <input
+                type="text"
+                value={firstName}
+                onChange={(event) => setFirstName(event.target.value)}
+                className="w-full rounded-xl border border-outline-variant bg-white px-4 py-3 text-on-surface transition-colors focus:border-primary focus:ring-0"
+                placeholder="Tu nombre"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-on-surface-variant">Apellido</label>
+              <input
+                type="text"
+                value={lastName}
+                onChange={(event) => setLastName(event.target.value)}
+                className="w-full rounded-xl border border-outline-variant bg-white px-4 py-3 text-on-surface transition-colors focus:border-primary focus:ring-0"
+                placeholder="Tu apellido"
+              />
+            </div>
+          </div>
+
+          <button
+            disabled={!firstName.trim() || !lastName.trim() || booking}
+            onClick={handleConfirm}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary-dim px-8 py-4 text-[15px] font-semibold text-white transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {booking ? 'Confirmando...' : 'Confirmar y enviar WhatsApp'}
+            <span className="material-symbols-outlined text-[20px]">send</span>
+          </button>
         </div>
       )}
     </Layout>

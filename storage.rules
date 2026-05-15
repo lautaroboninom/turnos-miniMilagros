@@ -6,10 +6,7 @@ service firebase.storage {
     }
 
     function isAdmin() {
-      return isAuthenticated() && (
-        (request.auth.token.email == "lautaroboninom@gmail.com" && request.auth.token.email_verified == true) ||
-        request.auth.token.email == "milagros@minimilagros.com"
-      );
+      return isAuthenticated();
     }
 
     function isValidImageUpload() {

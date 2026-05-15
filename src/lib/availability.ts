@@ -8,7 +8,7 @@ export const SHARE_SLOT_TIMES = ['08:00', '10:00', '13:00', '15:00', '17:00', '1
 export const SHARE_SLOT_DURATION_MINUTES = 30;
 export const MAX_SHARE_SLOT_TIMES = 8;
 
-export type ShareSlotStatus = 'free' | 'unavailable';
+export type ShareSlotStatus = 'free' | 'booked' | 'past' | 'closed';
 
 export type AvailabilityAppointment = Pick<Appointment, 'startTime' | 'endTime' | 'status'> & {
   date?: string;
@@ -100,11 +100,11 @@ export const getSlotStatus = (
   appointments: AvailabilityAppointment[],
 ): ShareSlotStatus => {
   if (!isBusinessDay(date) || !slotFitsBeforeClose(date, startTime, durationMinutes)) {
-    return 'unavailable';
+    return 'closed';
   }
 
   if (isPastSlot(date, startTime)) {
-    return 'unavailable';
+    return 'past';
   }
 
   const hasOverlap = appointments.some((appointment) => (
@@ -113,7 +113,7 @@ export const getSlotStatus = (
     slotOverlapsAppointment(date, startTime, durationMinutes, appointment)
   ));
 
-  return hasOverlap ? 'unavailable' : 'free';
+  return hasOverlap ? 'booked' : 'free';
 };
 
 export const getCandidateSlotTimesForDate = (date: Date, durationMinutes: number) => {
