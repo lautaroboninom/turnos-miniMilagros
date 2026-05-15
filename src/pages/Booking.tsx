@@ -11,6 +11,7 @@ import { DEFAULT_EMPLOYEE_ID, DEFAULT_EMPLOYEE_NAME, type Service, type StudioSe
 const getServiceEmployeeId = (service: Service) => service.employeeId?.trim() || DEFAULT_EMPLOYEE_ID;
 const getServiceEmployeeName = (service: Service) => service.employeeName?.trim() || DEFAULT_EMPLOYEE_NAME;
 const WHATSAPP_PHONE = '5491139244063';
+const RESERVATION_SAVE_TIMEOUT_MS = 12000;
 
 const buildReservationMessage = (
   firstName: string,
@@ -40,6 +41,25 @@ const buildWhatsAppRedirectUrl = (phone: string, text: string) => {
   });
 
   return `/redirigir-whatsapp?${search.toString()}`;
+};
+
+const withTimeout = async <T,>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string) => {
+  let timeoutId: number | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          reject(new Error(timeoutMessage));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId != null) {
+      window.clearTimeout(timeoutId);
+    }
+  }
 };
 
 export default function Booking() {
@@ -127,10 +147,24 @@ export default function Booking() {
   const handleConfirm = async () => {
     if (!service || !selectedTime || !firstName || !lastName || !settings) return;
 
+    const dateStr = format(selectedDate, 'yyyy-MM-dd');
+    const prettyDate = format(selectedDate, "eeee d 'de' MMMM", { locale: es });
+    const message = buildReservationMessage(
+      firstName,
+      lastName,
+      service,
+      prettyDate,
+      selectedTime,
+      settings.depositAmount,
+    );
+    const redirectUrl = buildWhatsAppRedirectUrl(WHATSAPP_PHONE, message);
+    const openedWhatsAppWindow = typeof window !== 'undefined'
+      ? window.open(redirectUrl, '_blank', 'noopener,noreferrer')
+      : null;
+
     setBooking(true);
 
     try {
-      const dateStr = format(selectedDate, 'yyyy-MM-dd');
       const timeParsed = parse(selectedTime, 'HH:mm', selectedDate);
       const endTimeParsed = addMinutes(timeParsed, service.durationMinutes);
       const endTimeStr = format(endTimeParsed, 'HH:mm');
@@ -154,21 +188,27 @@ export default function Booking() {
         createdAt: new Date().toISOString(),
       };
 
-      await addDoc(collection(db, 'appointments'), newAppointment);
-
-      const prettyDate = format(selectedDate, "eeee d 'de' MMMM", { locale: es });
-      const message = buildReservationMessage(
-        firstName,
-        lastName,
-        service,
-        prettyDate,
-        selectedTime,
-        settings.depositAmount,
+      await withTimeout(
+        addDoc(collection(db, 'appointments'), newAppointment),
+        RESERVATION_SAVE_TIMEOUT_MS,
+        'reservation-save-timeout',
       );
-      const redirectUrl = buildWhatsAppRedirectUrl(WHATSAPP_PHONE, message);
 
-      window.location.assign(redirectUrl);
+      if (!openedWhatsAppWindow) {
+        window.location.assign(redirectUrl);
+        return;
+      }
+
+      navigate('/', { replace: true });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      if (errorMessage === 'reservation-save-timeout') {
+        setBooking(false);
+        alert('WhatsApp se intento abrir, pero el guardado del turno demoro demasiado. Revisa la conexion y valida luego el turno en el panel admin.');
+        return;
+      }
+
       handleFirestoreError(error, OperationType.CREATE, 'appointments');
     } finally {
       setBooking(false);
