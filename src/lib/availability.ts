@@ -10,6 +10,16 @@ export const MAX_SHARE_SLOT_TIMES = 8;
 
 export type ShareSlotStatus = 'free' | 'booked' | 'past' | 'closed';
 
+export interface AvailabilityWindow {
+  startTime: string;
+  endTime: string;
+}
+
+export const DEFAULT_AVAILABILITY_WINDOW: AvailabilityWindow = {
+  startTime: BUSINESS_START_TIME,
+  endTime: BUSINESS_END_TIME,
+};
+
 export type AvailabilityAppointment = Pick<Appointment, 'startTime' | 'endTime' | 'status'> & {
   date?: string;
 };
@@ -67,12 +77,26 @@ const isSameDateAppointment = (date: Date, appointment: AvailabilityAppointment)
   !appointment.date || appointment.date === getDateKey(date)
 );
 
-const slotFitsBeforeClose = (date: Date, startTime: string, durationMinutes: number) => {
-  const start = parseTimeForDate(date, startTime);
-  const end = addMinutes(start, durationMinutes);
-  const close = parseTimeForDate(date, BUSINESS_END_TIME);
+export const slotFitsWithinAvailabilityWindow = (
+  startTime: string,
+  durationMinutes: number,
+  availabilityWindow: AvailabilityWindow = DEFAULT_AVAILABILITY_WINDOW,
+) => {
+  if (
+    !isValidTimeValue(startTime) ||
+    !isValidTimeValue(availabilityWindow.startTime) ||
+    !isValidTimeValue(availabilityWindow.endTime)
+  ) {
+    return false;
+  }
 
-  return isBefore(end, addMinutes(close, 1));
+  const slotStartMinutes = getTimeValueMinutes(startTime);
+  const slotEndMinutes = slotStartMinutes + durationMinutes;
+
+  return (
+    slotStartMinutes >= getTimeValueMinutes(availabilityWindow.startTime) &&
+    slotEndMinutes <= getTimeValueMinutes(availabilityWindow.endTime)
+  );
 };
 
 const slotOverlapsAppointment = (
@@ -98,8 +122,9 @@ export const getSlotStatus = (
   startTime: string,
   durationMinutes: number,
   appointments: AvailabilityAppointment[],
+  availabilityWindow: AvailabilityWindow = DEFAULT_AVAILABILITY_WINDOW,
 ): ShareSlotStatus => {
-  if (!isBusinessDay(date) || !slotFitsBeforeClose(date, startTime, durationMinutes)) {
+  if (!isBusinessDay(date) || !slotFitsWithinAvailabilityWindow(startTime, durationMinutes, availabilityWindow)) {
     return 'closed';
   }
 
@@ -118,12 +143,32 @@ export const getSlotStatus = (
 
 export const getCandidateSlotTimesForDate = (date: Date, durationMinutes: number) => {
   const slots: string[] = [];
-  let current = parseTimeForDate(date, BUSINESS_START_TIME);
-  const close = parseTimeForDate(date, BUSINESS_END_TIME);
+  let current = parseTimeForDate(date, DEFAULT_AVAILABILITY_WINDOW.startTime);
+  const close = parseTimeForDate(date, DEFAULT_AVAILABILITY_WINDOW.endTime);
 
   while (isBefore(current, close)) {
     const time = format(current, 'HH:mm');
-    if (slotFitsBeforeClose(date, time, durationMinutes)) {
+    if (slotFitsWithinAvailabilityWindow(time, durationMinutes)) {
+      slots.push(time);
+    }
+    current = addMinutes(current, SLOT_INTERVAL_MINUTES);
+  }
+
+  return slots;
+};
+
+export const getCandidateSlotTimesForDateWithinWindow = (
+  date: Date,
+  durationMinutes: number,
+  availabilityWindow: AvailabilityWindow = DEFAULT_AVAILABILITY_WINDOW,
+) => {
+  const slots: string[] = [];
+  let current = parseTimeForDate(date, availabilityWindow.startTime);
+  const close = parseTimeForDate(date, availabilityWindow.endTime);
+
+  while (isBefore(current, close)) {
+    const time = format(current, 'HH:mm');
+    if (slotFitsWithinAvailabilityWindow(time, durationMinutes, availabilityWindow)) {
       slots.push(time);
     }
     current = addMinutes(current, SLOT_INTERVAL_MINUTES);
@@ -136,9 +181,10 @@ export const getAvailableSlotsForDate = (
   date: Date,
   durationMinutes: number,
   appointments: AvailabilityAppointment[],
+  availabilityWindow: AvailabilityWindow = DEFAULT_AVAILABILITY_WINDOW,
 ) => (
-  getCandidateSlotTimesForDate(date, durationMinutes)
-    .filter((time) => getSlotStatus(date, time, durationMinutes, appointments) === 'free')
+  getCandidateSlotTimesForDateWithinWindow(date, durationMinutes, availabilityWindow)
+    .filter((time) => getSlotStatus(date, time, durationMinutes, appointments, availabilityWindow) === 'free')
 );
 
 export const getShareSlotsForDate = (
@@ -146,11 +192,12 @@ export const getShareSlotsForDate = (
   durationMinutes: number,
   appointments: AvailabilityAppointment[],
   slotTimes: unknown = SHARE_SLOT_TIMES,
+  availabilityWindow: AvailabilityWindow = DEFAULT_AVAILABILITY_WINDOW,
 ): ShareSlot[] => (
   normalizeShareSlotTimes(slotTimes)
     .map((time) => ({
       time,
-      status: getSlotStatus(date, time, durationMinutes, appointments),
+      status: getSlotStatus(date, time, durationMinutes, appointments, availabilityWindow),
     }))
 );
 
@@ -159,13 +206,23 @@ export const buildShareWeekAvailability = (
   durationMinutes: number,
   appointments: AvailabilityAppointment[],
   slotTimes: unknown = SHARE_SLOT_TIMES,
+  availabilityWindow: AvailabilityWindow = DEFAULT_AVAILABILITY_WINDOW,
 ): ShareDayAvailability[] => (
   Array.from({ length: 6 }, (_, index) => {
     const date = addDays(weekStart, index);
     return {
       date,
       dateKey: getDateKey(date),
-      slots: getShareSlotsForDate(date, durationMinutes, appointments, slotTimes),
+      slots: getShareSlotsForDate(date, durationMinutes, appointments, slotTimes, availabilityWindow),
     };
   })
+);
+
+export const getInvalidShareSlotTimes = (
+  slotTimes: unknown,
+  durationMinutes: number,
+  availabilityWindow: AvailabilityWindow = DEFAULT_AVAILABILITY_WINDOW,
+) => (
+  normalizeShareSlotTimes(slotTimes)
+    .filter((time) => !slotFitsWithinAvailabilityWindow(time, durationMinutes, availabilityWindow))
 );

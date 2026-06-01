@@ -4,13 +4,7 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import { collection, doc, onSnapshot, query } from 'firebase/firestore';
 import { GalleryImage, Service, StudioSettings } from '../types';
 import { useNavigate } from 'react-router-dom';
-
-const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
-  { src: 'https://picsum.photos/seed/nails1/400/500', alt: 'Manicura' },
-  { src: 'https://picsum.photos/seed/lashes1/400/400', alt: 'Pestanas' },
-  { src: 'https://picsum.photos/seed/facial1/400/600', alt: 'Facial' },
-  { src: 'https://picsum.photos/seed/spa1/400/400', alt: 'Spa' },
-];
+import { DEFAULT_GALLERY_IMAGES, normalizeStudioSettings } from '../lib/studioSettings';
 
 export default function Home() {
   const [services, setServices] = useState<Service[]>([]);
@@ -39,20 +33,8 @@ export default function Home() {
       }
 
       const data = snapshot.data() as StudioSettings;
-      if (!Array.isArray(data.galleryImages) || data.galleryImages.length === 0) {
-        setGalleryImages(DEFAULT_GALLERY_IMAGES);
-        return;
-      }
-
-      const sanitizedGallery = data.galleryImages
-        .filter((img): img is GalleryImage => typeof img?.src === 'string')
-        .map((img) => ({
-          src: img.src.trim(),
-          alt: typeof img.alt === 'string' && img.alt.trim() ? img.alt.trim() : 'Trabajo',
-        }))
-        .filter((img) => img.src.length > 0);
-
-      setGalleryImages(sanitizedGallery.length > 0 ? sanitizedGallery : DEFAULT_GALLERY_IMAGES);
+      const normalizedSettings = normalizeStudioSettings(data);
+      setGalleryImages(normalizedSettings.galleryImages as GalleryImage[]);
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, 'settings/global');
     });

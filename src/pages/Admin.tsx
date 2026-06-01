@@ -12,17 +12,18 @@ import {
   Appointment,
   Employee,
   GalleryImage,
+  ShareBackgroundImageSourceType,
   StudioSettings,
 } from '../types';
 import { normalizeShareSlotTimes, SHARE_SLOT_TIMES } from '../lib/availability';
 import { format } from 'date-fns';
-
-const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
-  { src: 'https://picsum.photos/seed/nails1/400/500', alt: 'Manicura' },
-  { src: 'https://picsum.photos/seed/lashes1/400/400', alt: 'Pestanas' },
-  { src: 'https://picsum.photos/seed/facial1/400/600', alt: 'Facial' },
-  { src: 'https://picsum.photos/seed/spa1/400/400', alt: 'Spa' },
-];
+import {
+  DEFAULT_GALLERY_IMAGES,
+  buildSettingsPayload,
+  getShareSettingsValidationMessage,
+  normalizeShareBackgroundOverlayOpacity,
+  normalizeStudioSettings,
+} from '../lib/studioSettings';
 
 const DEFAULT_EMPLOYEE: Employee = {
   id: DEFAULT_EMPLOYEE_ID,
@@ -154,23 +155,6 @@ const makeSafePathSegment = (value: string) => (
     .slice(0, 40) || 'servicio'
 );
 
-const buildSettingsPayload = (source: StudioSettings): StudioSettings => {
-  const normalizedGallery = (source.galleryImages ?? [])
-    .map((img) => ({ src: (img.src ?? '').trim(), alt: (img.alt ?? '').trim() || 'Trabajo' }))
-    .filter((img) => img.src.length > 0);
-
-  const depositAmount = Number.isFinite(source.depositAmount) && source.depositAmount >= 0
-    ? source.depositAmount
-    : 0;
-
-  return {
-    depositAmount,
-    galleryImages: normalizedGallery.length > 0 ? normalizedGallery : DEFAULT_GALLERY_IMAGES,
-    shareSlotTimes: normalizeShareSlotTimes(source.shareSlotTimes),
-    updatedAt: new Date().toISOString(),
-  };
-};
-
 const getSettingsSaveErrorMessage = (error: any) => {
   if (error?.code === 'permission-denied') {
     return 'No tenes permisos para guardar la configuracion. Revisa las reglas de Firestore.';
@@ -190,22 +174,23 @@ export default function Admin() {
   const [services, setServices] = useState<Service[]>([]);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([DEFAULT_EMPLOYEE]);
-  const [settings, setSettings] = useState<StudioSettings>({
+  const [settings, setSettings] = useState<StudioSettings>(normalizeStudioSettings({
     depositAmount: 0,
     updatedAt: new Date().toISOString(),
     galleryImages: DEFAULT_GALLERY_IMAGES,
     shareSlotTimes: [...SHARE_SLOT_TIMES],
-  });
+  }));
   const [tab, setTab] = useState<AdminTabId>('turnos');
   const [email, setEmail] = useState('milagros@minimilagros.com');
   const [password, setPassword] = useState('');
   const [uploadingGalleryIndex, setUploadingGalleryIndex] = useState<number | null>(null);
+  const [uploadingShareBackground, setUploadingShareBackground] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSaveError, setSettingsSaveError] = useState('');
   const [settingsSaveNotice, setSettingsSaveNotice] = useState('');
-  const [savingShareSlotTimes, setSavingShareSlotTimes] = useState(false);
-  const [shareSlotTimesSaveError, setShareSlotTimesSaveError] = useState('');
-  const [shareSlotTimesSaveNotice, setShareSlotTimesSaveNotice] = useState('');
+  const [savingShareSettings, setSavingShareSettings] = useState(false);
+  const [shareSettingsSaveError, setShareSettingsSaveError] = useState('');
+  const [shareSettingsSaveNotice, setShareSettingsSaveNotice] = useState('');
   const [editingEmployeeId, setEditingEmployeeId] = useState<string | null>(null);
   const [employeeNameDraft, setEmployeeNameDraft] = useState('');
   const [savingEmployee, setSavingEmployee] = useState(false);
@@ -272,19 +257,7 @@ export default function Admin() {
     const unsubSettings = onSnapshot(doc(db, 'settings', 'global'), snap => {
       if (!snap.exists()) return;
       const data = snap.data() as StudioSettings;
-      const nextGallery = Array.isArray(data.galleryImages)
-        ? data.galleryImages
-          .filter((img): img is GalleryImage => typeof img?.src === 'string')
-          .map((img) => ({ src: img.src.trim(), alt: typeof img.alt === 'string' ? img.alt : '' }))
-          .filter((img) => img.src.length > 0)
-        : [];
-
-      setSettings({
-        depositAmount: typeof data.depositAmount === 'number' ? data.depositAmount : 0,
-        updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : new Date().toISOString(),
-        galleryImages: nextGallery.length > 0 ? nextGallery : DEFAULT_GALLERY_IMAGES,
-        shareSlotTimes: normalizeShareSlotTimes(data.shareSlotTimes),
-      });
+      setSettings(normalizeStudioSettings(data));
     }, err => handleFirestoreError(err, OperationType.GET, 'settings/global'));
 
     return () => {
@@ -591,20 +564,90 @@ export default function Admin() {
     }
   };
 
-  const persistSettings = async (sourceSettings: StudioSettings, successMessage?: string) => {
-    const nextSettings = buildSettingsPayload(sourceSettings);
+  const clearSettingsFeedback = () => {
+    setSettingsSaveError('');
+    setSettingsSaveNotice('');
+  };
+
+  const clearShareFeedback = () => {
+    setShareSettingsSaveError('');
+    setShareSettingsSaveNotice('');
+  };
+
+  const clearAllSettingsFeedback = () => {
+    clearSettingsFeedback();
+    clearShareFeedback();
+  };
+
+  const updateSettingsState = (updater: (previous: StudioSettings) => StudioSettings) => {
+    clearAllSettingsFeedback();
+    setSettings((previous) => updater(previous));
+  };
+
+  const persistSettings = async (
+    sourceSettings: StudioSettings,
+    successMessage: string | undefined,
+    saveContext: 'config' | 'share' = 'config',
+  ) => {
+    const shareValidationError = getShareSettingsValidationMessage(sourceSettings);
+
+    if (shareValidationError) {
+      if (saveContext === 'share') {
+        clearShareFeedback();
+        setShareSettingsSaveError(shareValidationError);
+      } else {
+        clearSettingsFeedback();
+        setSettingsSaveError(shareValidationError);
+      }
+      return false;
+    }
+
+    const normalizedSource = normalizeStudioSettings(sourceSettings);
+
+    if (
+      normalizedSource.shareBackgroundImageSourceType === 'url' &&
+      normalizedSource.shareBackgroundImageUrl?.trim() &&
+      !isValidHttpUrl(normalizedSource.shareBackgroundImageUrl)
+    ) {
+      const message = 'Ingresa un link valido para el fondo que empiece con http:// o https://.';
+      if (saveContext === 'share') {
+        clearShareFeedback();
+        setShareSettingsSaveError(message);
+      } else {
+        clearSettingsFeedback();
+        setSettingsSaveError(message);
+      }
+      return false;
+    }
+
+    const nextSettings = buildSettingsPayload(normalizedSource);
 
     try {
-      setSavingSettings(true);
-      setSettingsSaveError('');
-      setSettingsSaveNotice('');
+      if (saveContext === 'share') {
+        setSavingShareSettings(true);
+        clearShareFeedback();
+      } else {
+        setSavingSettings(true);
+        clearSettingsFeedback();
+      }
       await setDoc(doc(db, 'settings', 'global'), nextSettings);
-      setSettings(nextSettings);
-      if (successMessage) setSettingsSaveNotice(successMessage);
+      setSettings(normalizeStudioSettings(nextSettings));
+      if (successMessage) {
+        if (saveContext === 'share') {
+          setShareSettingsSaveNotice(successMessage);
+        } else {
+          setSettingsSaveNotice(successMessage);
+        }
+      }
       return true;
     } catch (e: any) {
       console.error('Settings save error', e);
-      setSettingsSaveError(getSettingsSaveErrorMessage(e));
+      const message = getSettingsSaveErrorMessage(e);
+      if (saveContext === 'share') {
+        setShareSettingsSaveError(message);
+      } else {
+        setSettingsSaveError(message);
+      }
       try {
         handleFirestoreError(e, OperationType.WRITE, 'settings/global');
       } catch {
@@ -612,53 +655,62 @@ export default function Admin() {
       }
       return false;
     } finally {
-      setSavingSettings(false);
+      if (saveContext === 'share') {
+        setSavingShareSettings(false);
+      } else {
+        setSavingSettings(false);
+      }
     }
   };
 
   const saveSettings = async () => {
-    const saved = await persistSettings(settings, 'Configuracion guardada.');
+    const saved = await persistSettings(settings, 'Configuracion guardada.', 'config');
     if (saved) alert('Configuracion guardada');
   };
 
   const updateShareSlotTimes = (slotTimes: string[]) => {
-    setShareSlotTimesSaveError('');
-    setShareSlotTimesSaveNotice('');
-    setSettingsSaveError('');
-    setSettingsSaveNotice('');
-    setSettings((prev) => ({ ...prev, shareSlotTimes: normalizeShareSlotTimes(slotTimes) }));
+    updateSettingsState((previous) => ({
+      ...previous,
+      shareSlotTimes: normalizeShareSlotTimes(slotTimes),
+    }));
   };
 
-  const saveShareSlotTimes = async (slotTimes: string[]) => {
-    const nextSettings = buildSettingsPayload({
-      ...settings,
-      shareSlotTimes: normalizeShareSlotTimes(slotTimes),
-    });
+  const updateAvailabilityWindow = (window: { startTime: string; endTime: string }) => {
+    updateSettingsState((previous) => ({
+      ...previous,
+      availabilityStartTime: window.startTime,
+      availabilityEndTime: window.endTime,
+    }));
+  };
 
-    try {
-      setSavingShareSlotTimes(true);
-      setShareSlotTimesSaveError('');
-      setShareSlotTimesSaveNotice('');
-      await setDoc(doc(db, 'settings', 'global'), nextSettings);
-      setSettings(nextSettings);
-      setShareSlotTimesSaveNotice('Horarios guardados.');
-    } catch (e: any) {
-      console.error('Share slot times save error', e);
-      setShareSlotTimesSaveError(getSettingsSaveErrorMessage(e));
-      try {
-        handleFirestoreError(e, OperationType.WRITE, 'settings/global');
-      } catch {
-        // Keep the share panel open after logging the Firestore context.
-      }
-    } finally {
-      setSavingShareSlotTimes(false);
-    }
+  const updateShareBackgroundImage = (nextBackground: {
+    imageUrl: string;
+    sourceType: ShareBackgroundImageSourceType;
+    storagePath?: string;
+  }) => {
+    updateSettingsState((previous) => ({
+      ...previous,
+      shareBackgroundImageUrl: nextBackground.imageUrl,
+      shareBackgroundImageSourceType: nextBackground.imageUrl.trim()
+        ? nextBackground.sourceType
+        : undefined,
+      shareBackgroundImageStoragePath: nextBackground.storagePath ?? '',
+    }));
+  };
+
+  const updateShareBackgroundOverlayOpacity = (opacity: number) => {
+    updateSettingsState((previous) => ({
+      ...previous,
+      shareBackgroundOverlayOpacity: normalizeShareBackgroundOverlayOpacity(opacity),
+    }));
+  };
+
+  const saveShareSettings = async () => {
+    await persistSettings(settings, 'Compartir guardado.', 'share');
   };
 
   const updateGalleryImage = (index: number, key: keyof GalleryImage, value: string) => {
-    setSettingsSaveError('');
-    setSettingsSaveNotice('');
-    setSettings((prev) => {
+    updateSettingsState((prev) => {
       const currentGallery = [...(prev.galleryImages ?? [])];
       if (!currentGallery[index]) return prev;
       currentGallery[index] = { ...currentGallery[index], [key]: value };
@@ -667,9 +719,7 @@ export default function Admin() {
   };
 
   const addGalleryImage = () => {
-    setSettingsSaveError('');
-    setSettingsSaveNotice('');
-    setSettings((prev) => {
+    updateSettingsState((prev) => {
       const currentGallery = [...(prev.galleryImages ?? [])];
       return { ...prev, galleryImages: [...currentGallery, { src: '', alt: '' }] };
     });
@@ -681,9 +731,7 @@ export default function Admin() {
       return;
     }
 
-    setSettingsSaveError('');
-    setSettingsSaveNotice('');
-    setSettings((prev) => {
+    updateSettingsState((prev) => {
       const currentGallery = [...(prev.galleryImages ?? [])];
       currentGallery.splice(index, 1);
       return { ...prev, galleryImages: currentGallery };
@@ -722,7 +770,8 @@ export default function Admin() {
 
       const saved = await persistSettings(
         { ...settings, galleryImages: nextGallery },
-        'Imagen subida y guardada automaticamente.'
+        'Imagen subida y guardada automaticamente.',
+        'config',
       );
 
       if (!saved) {
@@ -733,6 +782,51 @@ export default function Admin() {
       alert('No se pudo subir la imagen. Verifica Firebase Storage e intenta nuevamente.');
     } finally {
       setUploadingGalleryIndex(null);
+    }
+  };
+
+  const uploadShareBackgroundImage = async (file: File | null) => {
+    if (!file) return;
+
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      clearAllSettingsFeedback();
+      setShareSettingsSaveError('Subi una imagen JPG, PNG o WEBP.');
+      return;
+    }
+
+    if (file.size > MAX_IMAGE_SIZE) {
+      clearAllSettingsFeedback();
+      setShareSettingsSaveError('La imagen no puede superar 5 MB.');
+      return;
+    }
+
+    setUploadingShareBackground(true);
+    clearAllSettingsFeedback();
+
+    try {
+      const baseName = file.name.replace(/\.[^.]+$/, '') || 'fondo-compartir';
+      const storagePath = `share-background/${Date.now()}-${makeSafePathSegment(baseName)}.${getFileExtension(file)}`;
+      const storageRef = ref(storage, storagePath);
+      await uploadBytes(storageRef, file, { contentType: file.type });
+      const downloadUrl = await getDownloadURL(storageRef);
+
+      setSettings((previous) => ({
+        ...previous,
+        shareBackgroundImageUrl: downloadUrl,
+        shareBackgroundImageSourceType: 'upload',
+        shareBackgroundImageStoragePath: storagePath,
+      }));
+      setShareSettingsSaveNotice('Fondo subido. Falta guardar Compartir para publicarlo.');
+    } catch (error: any) {
+      console.error('Share background upload error', error);
+      const isPermissionError = error?.code === 'storage/unauthorized' || error?.code === 'permission-denied';
+      setShareSettingsSaveError(
+        isPermissionError
+          ? 'No tenes permisos para guardar esta imagen. Revisa reglas de Storage y Firestore.'
+          : 'No se pudo subir el fondo. Revisa la conexion e intenta de nuevo.',
+      );
+    } finally {
+      setUploadingShareBackground(false);
     }
   };
 
@@ -873,11 +967,22 @@ export default function Admin() {
           appointments={appointments}
           galleryImages={settings.galleryImages}
           slotTimes={settings.shareSlotTimes}
+          availabilityStartTime={settings.availabilityStartTime}
+          availabilityEndTime={settings.availabilityEndTime}
+          shareBackgroundImageUrl={settings.shareBackgroundImageUrl}
+          shareBackgroundImageSourceType={settings.shareBackgroundImageSourceType}
+          shareBackgroundOverlayOpacity={settings.shareBackgroundOverlayOpacity}
           onSlotTimesChange={updateShareSlotTimes}
-          onSaveSlotTimes={saveShareSlotTimes}
-          savingSlotTimes={savingShareSlotTimes}
-          slotTimesSaveNotice={shareSlotTimesSaveNotice}
-          slotTimesSaveError={shareSlotTimesSaveError}
+          onAvailabilityWindowChange={updateAvailabilityWindow}
+          onShareBackgroundImageChange={updateShareBackgroundImage}
+          onShareBackgroundOverlayOpacityChange={updateShareBackgroundOverlayOpacity}
+          onShareBackgroundUpload={uploadShareBackgroundImage}
+          uploadingBackgroundImage={uploadingShareBackground}
+          onSaveShareSettings={saveShareSettings}
+          savingShareSettings={savingShareSettings}
+          shareSettingsSaveNotice={shareSettingsSaveNotice}
+          shareSettingsSaveError={shareSettingsSaveError}
+          shareSettingsValidationError={getShareSettingsValidationMessage(settings)}
         />
       )}
 
@@ -889,9 +994,53 @@ export default function Admin() {
               type="number"
               min="0"
               value={settings.depositAmount}
-              onChange={e => setSettings({ ...settings, depositAmount: Number(e.target.value) })}
+              onChange={e => updateSettingsState((previous) => ({
+                ...previous,
+                depositAmount: Number(e.target.value),
+              }))}
               className="w-full mb-4 bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3"
             />
+          </section>
+
+          <section className="border-t border-outline-variant pt-8">
+            <div className="mb-4">
+              <h2 className="font-serif text-[18px] text-primary">Disponibilidad</h2>
+              <p className="mt-1 text-sm text-on-surface-variant">
+                Este rango aplica tanto a la reserva publica como a la placa de Compartir.
+              </p>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-primary">Inicio</span>
+                <input
+                  data-settings-field="availability-start-time"
+                  type="time"
+                  step="900"
+                  value={settings.availabilityStartTime ?? '08:00'}
+                  onChange={e => updateAvailabilityWindow({
+                    startTime: e.target.value,
+                    endTime: settings.availabilityEndTime ?? '19:00',
+                  })}
+                  className="w-full rounded-xl border border-outline-variant bg-white px-4 py-3 text-on-surface focus:border-primary focus:ring-0"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-primary">Cierre real</span>
+                <input
+                  data-settings-field="availability-end-time"
+                  type="time"
+                  step="900"
+                  value={settings.availabilityEndTime ?? '19:00'}
+                  onChange={e => updateAvailabilityWindow({
+                    startTime: settings.availabilityStartTime ?? '08:00',
+                    endTime: e.target.value,
+                  })}
+                  className="w-full rounded-xl border border-outline-variant bg-white px-4 py-3 text-on-surface focus:border-primary focus:ring-0"
+                />
+              </label>
+            </div>
           </section>
 
           <section className="border-t border-outline-variant pt-8">

@@ -6,6 +6,7 @@ import { doc, getDoc, getDocs, query, where, collection } from 'firebase/firesto
 import Layout from '../components/Layout';
 import { db, handleFirestoreError, OperationType, savePublicPendingAppointment } from '../firebase';
 import { getAvailableSlotsForDate, type AvailabilityAppointment } from '../lib/availability';
+import { getAvailabilityWindow, normalizeStudioSettings } from '../lib/studioSettings';
 import { DEFAULT_EMPLOYEE_ID, DEFAULT_EMPLOYEE_NAME, type Appointment, type Service, type StudioSettings } from '../types';
 
 const getServiceEmployeeId = (service: Service) => service.employeeId?.trim() || DEFAULT_EMPLOYEE_ID;
@@ -70,9 +71,12 @@ export default function Booking() {
 
         const settingsSnap = await getDoc(doc(db, 'settings', 'global'));
         if (settingsSnap.exists()) {
-          setSettings(settingsSnap.data() as StudioSettings);
+          setSettings(normalizeStudioSettings(settingsSnap.data() as StudioSettings));
         } else {
-          setSettings({ depositAmount: 5000, updatedAt: new Date().toISOString() });
+          setSettings(normalizeStudioSettings({
+            depositAmount: 5000,
+            updatedAt: new Date().toISOString(),
+          }));
         }
       } catch (error) {
         handleFirestoreError(error, OperationType.GET, 'services/settings');
@@ -85,7 +89,7 @@ export default function Booking() {
   }, [serviceId]);
 
   useEffect(() => {
-    if (!service) return;
+    if (!service || !settings) return;
 
     async function generateSlots() {
       if (getDay(selectedDate) === 0) {
@@ -115,7 +119,12 @@ export default function Booking() {
           });
 
         setAvailableSlots(
-          getAvailableSlotsForDate(selectedDate, service.durationMinutes, relevantAppointments),
+          getAvailableSlotsForDate(
+            selectedDate,
+            service.durationMinutes,
+            relevantAppointments,
+            getAvailabilityWindow(settings),
+          ),
         );
       } catch (error) {
         handleFirestoreError(error, OperationType.GET, 'appointments');
@@ -123,7 +132,7 @@ export default function Booking() {
     }
 
     void generateSlots();
-  }, [selectedDate, service]);
+  }, [selectedDate, service, settings]);
 
   const handleConfirm = async () => {
     if (!service || !selectedTime || !firstName || !lastName || !settings) return;

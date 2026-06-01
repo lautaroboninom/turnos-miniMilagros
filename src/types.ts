@@ -46,9 +46,17 @@ export interface GalleryImage {
   alt: string;
 }
 
+export type ShareBackgroundImageSourceType = 'library' | 'url' | 'upload';
+
 export interface StudioSettings {
   depositAmount: number;
   updatedAt: string;
   galleryImages?: GalleryImage[];
   shareSlotTimes?: string[];
+  availabilityStartTime?: string;
+  availabilityEndTime?: string;
+  shareBackgroundImageUrl?: string;
+  shareBackgroundImageSourceType?: ShareBackgroundImageSourceType;
+  shareBackgroundImageStoragePath?: string;
+  shareBackgroundOverlayOpacity?: number;
 }
