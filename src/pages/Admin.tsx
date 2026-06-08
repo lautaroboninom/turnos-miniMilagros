@@ -3,8 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import ShareWeekPreview from '../components/ShareWeekPreview';
 import {
+  completeGoogleRedirectLogin,
   db,
   auth,
+  hasPendingGoogleRedirectLogin,
   storage,
   loginWithEmail,
   loginWithGoogle,
@@ -236,37 +238,83 @@ const getSettingsSaveErrorMessage = (error: any) => {
   return 'No se pudo guardar la configuracion. Revisa la conexion e intenta de nuevo.';
 };
 
+const getAuthErrorCode = (error: any) => {
+  if (typeof error?.code === 'string') {
+    return error.code;
+  }
+
+  const message = typeof error?.message === 'string' ? error.message : '';
+  const match = message.match(/auth\/[a-z-]+/i);
+  return match?.[0]?.toLowerCase() || '';
+};
+
 const getAuthErrorMessage = (error: any) => {
-  if (!error?.code) {
+  const errorCode = getAuthErrorCode(error);
+  const errorMessage = typeof error?.message === 'string' ? error.message.toUpperCase() : '';
+
+  if (errorMessage.includes('CONFIGURATION_NOT_FOUND')) {
+    return "Google Sign-In no esta configurado en Firebase Authentication. Habilita el proveedor Google.";
+  }
+
+  if (!errorCode) {
     return 'No se pudo ingresar. Revisa la conexion e intenta nuevamente.';
   }
 
-  if (error.code === ADMIN_ACCESS_ERROR_CODE) {
+  if (errorCode === ADMIN_ACCESS_ERROR_CODE) {
     return ADMIN_ACCESS_ERROR_MESSAGE;
   }
 
-  if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+  if (errorCode === 'auth/invalid-credential' || errorCode === 'auth/user-not-found' || errorCode === 'auth/wrong-password') {
     return 'Email o contrasena incorrectos. Revisa los datos o restablece la clave desde Firebase Authentication.';
   }
 
-  if (error.code === 'auth/operation-not-allowed') {
+  if (errorCode === 'auth/operation-not-allowed') {
     return "Para ingresar, habilita los proveedores 'Google' y/o 'Correo electronico/Contrasena' en Firebase Authentication.";
   }
 
-  if (error.code === 'auth/too-many-requests') {
+  if (errorCode === 'auth/configuration-not-found') {
+    return "Google Sign-In no esta configurado en Firebase Authentication. Habilita el proveedor Google.";
+  }
+
+  if (errorCode === 'auth/too-many-requests') {
     return 'Firebase bloqueo temporalmente los intentos de ingreso. Espera unos minutos y proba de nuevo.';
   }
 
-  if (error.code === 'auth/popup-blocked') {
+  if (errorCode === 'auth/user-disabled') {
+    return 'Esta cuenta fue deshabilitada en Firebase Authentication.';
+  }
+
+  if (errorCode === 'auth/network-request-failed') {
+    return 'Firebase no pudo conectarse. Revisa internet, VPN o bloqueadores del navegador e intenta de nuevo.';
+  }
+
+  if (errorCode === 'auth/unauthorized-domain') {
+    const currentDomain = typeof window !== 'undefined' ? window.location.hostname : 'este dominio';
+    return `Google no esta autorizado para ${currentDomain}. Agrega ese dominio en Firebase Authentication > Authorized domains.`;
+  }
+
+  if (errorCode === 'auth/invalid-api-key') {
+    return 'La configuracion de Firebase Auth es invalida. Revisa la apiKey del proyecto.';
+  }
+
+  if (errorCode === 'auth/web-storage-unsupported') {
+    return 'Este navegador bloquea el almacenamiento necesario para iniciar sesion. Proba en Chrome, Safari o Edge normal.';
+  }
+
+  if (errorCode === 'auth/popup-blocked') {
     return 'El navegador bloqueo la ventana emergente de Google. Habilitala e intenta de nuevo.';
   }
 
-  if (error.code === 'auth/cancelled-popup-request') {
+  if (errorCode === 'auth/cancelled-popup-request') {
     return 'Ya hay un intento de ingreso con Google en curso.';
   }
 
-  if (error.code === 'auth/popup-closed-by-user') {
+  if (errorCode === 'auth/popup-closed-by-user') {
     return '';
+  }
+
+  if (errorCode === 'auth/operation-not-supported-in-this-environment') {
+    return 'Este navegador no permite abrir Google Sign-In con ventana emergente. Se intento usar redireccion en su lugar.';
   }
 
   return 'No se pudo ingresar. Revisa la conexion e intenta nuevamente.';
@@ -314,6 +362,37 @@ export default function Admin() {
   useEffect(() => {
     const unsubAuth = auth.onAuthStateChanged((currentUser) => setUser(currentUser));
     return () => unsubAuth();
+  }, []);
+
+  useEffect(() => {
+    if (!hasPendingGoogleRedirectLogin()) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const resolveGoogleRedirect = async () => {
+      try {
+        setAuthLoading('google');
+        setAuthError('');
+        await completeGoogleRedirectLogin();
+      } catch (error: any) {
+        if (!cancelled) {
+          console.error('Google redirect login error', error);
+          setAuthError(getAuthErrorMessage(error));
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthLoading(null);
+        }
+      }
+    };
+
+    void resolveGoogleRedirect();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1278,9 +1357,6 @@ export default function Admin() {
       <Layout>
         <div className="text-center py-10 bg-background border border-primary-container rounded-[20px] shadow-sm max-w-sm mx-auto">
           <h1 className="text-[24px] font-serif text-primary mb-6">Acceso a Gestor</h1>
-          <p className="px-6 mb-4 text-sm text-on-surface-variant">
-            Pueden ingresar las cuentas administradoras <span className="font-medium text-on-surface">{ADMIN_EMAILS_LABEL}</span>.
-          </p>
           {authError && (
             <div role="alert" className="mx-6 mb-4 rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
               {authError}
