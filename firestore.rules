@@ -60,11 +60,14 @@ service cloud.firestore {
       return request.auth != null;
     }
     
-    // This app only exposes authenticated access for the admin panel.
-    // Allow any signed-in dashboard user to manage the backoffice so
-    // Milagros and future staff accounts are not blocked by hardcoded emails.
+    // Only the designated admin emails can access the backoffice.
     function isAdmin() {
-      return isAuthenticated();
+      return isAuthenticated()
+        && request.auth.token.email_verified == true
+        && (
+          request.auth.token.email == 'milagrosisas34@gmail.com'
+          || request.auth.token.email == 'lautaroboninom@gmail.com'
+        );
     }
     
     function hasRequiredFields(fields) {

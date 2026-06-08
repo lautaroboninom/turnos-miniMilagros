@@ -1,8 +1,17 @@
-import { useState, useEffect, useRef, type FormEvent } from 'react';
+﻿import { useState, useEffect, useRef, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import ShareWeekPreview from '../components/ShareWeekPreview';
-import { db, auth, storage, loginWithEmail, logout, handleFirestoreError, OperationType } from '../firebase';
+import {
+  db,
+  auth,
+  storage,
+  loginWithEmail,
+  loginWithGoogle,
+  logout,
+  handleFirestoreError,
+  OperationType,
+} from '../firebase';
 import { collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc, getDoc } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import {
@@ -15,8 +24,22 @@ import {
   ShareBackgroundImageSourceType,
   StudioSettings,
 } from '../types';
-import { normalizeShareSlotTimes, SHARE_SLOT_TIMES } from '../lib/availability';
-import { format } from 'date-fns';
+import {
+  BUSINESS_END_TIME,
+  BUSINESS_START_TIME,
+  getTimeValueMinutes,
+  isBusinessDay,
+  isValidTimeValue,
+  normalizeShareSlotTimes,
+  SHARE_SLOT_TIMES,
+} from '../lib/availability';
+import {
+  ADMIN_EMAILS_LABEL,
+  ADMIN_ACCESS_ERROR_CODE,
+  ADMIN_ACCESS_ERROR_MESSAGE,
+  PRIMARY_ADMIN_EMAIL,
+  isAdminUser,
+} from '../lib/adminAuth';
 import {
   DEFAULT_GALLERY_IMAGES,
   buildSettingsPayload,
@@ -24,6 +47,7 @@ import {
   normalizeShareBackgroundOverlayOpacity,
   normalizeStudioSettings,
 } from '../lib/studioSettings';
+import { addDays, addMinutes, format, isValid, parse } from 'date-fns';
 
 const DEFAULT_EMPLOYEE: Employee = {
   id: DEFAULT_EMPLOYEE_ID,
@@ -55,8 +79,23 @@ type ServiceImageDraft = {
   file: File | null;
 };
 
+type EditingAppointmentDraft = {
+  serviceId: string;
+  employeeId: string;
+  clientFirstName: string;
+  clientLastName: string;
+  date: string;
+  startTime: string;
+  status: Appointment['status'];
+};
+
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const APPOINTMENT_STATUS_LABELS: Record<Appointment['status'], string> = {
+  pending: 'Pendiente',
+  confirmed: 'Confirmado',
+  cancelled: 'Cancelado',
+};
 
 const normalizeEmployeeName = (value: string) => value.trim().replace(/\s+/g, ' ');
 
@@ -99,6 +138,36 @@ const toEditingService = (service?: Service): EditingService => ({
   employeeId: getEmployeeIdWithFallback(service),
   employeeName: getEmployeeNameWithFallback(service),
 });
+
+const toEditingAppointmentDraft = (appointment: Appointment): EditingAppointmentDraft => ({
+  serviceId: appointment.serviceId,
+  employeeId: getEmployeeIdWithFallback(appointment),
+  clientFirstName: appointment.clientFirstName,
+  clientLastName: appointment.clientLastName,
+  date: appointment.date,
+  startTime: appointment.startTime,
+  status: appointment.status,
+});
+
+const getTodayDateKey = () => format(new Date(), 'yyyy-MM-dd');
+
+const parseDateKey = (value: string) => parse(value, 'yyyy-MM-dd', new Date());
+
+const isValidDateKey = (value: string) => {
+  if (!value) return false;
+
+  const parsed = parseDateKey(value);
+  return isValid(parsed) && format(parsed, 'yyyy-MM-dd') === value;
+};
+
+const formatDateKeyLabel = (value: string) => (
+  isValidDateKey(value) ? format(parseDateKey(value), 'dd/MM/yyyy') : value
+);
+
+const shiftDateKey = (value: string, amount: number) => {
+  const baseDate = isValidDateKey(value) ? parseDateKey(value) : new Date();
+  return format(addDays(baseDate, amount), 'yyyy-MM-dd');
+};
 
 const parseLocalizedNumber = (value?: string) => {
   const trimmed = (value || '').trim().replace(/\s+/g, '');
@@ -167,6 +236,42 @@ const getSettingsSaveErrorMessage = (error: any) => {
   return 'No se pudo guardar la configuracion. Revisa la conexion e intenta de nuevo.';
 };
 
+const getAuthErrorMessage = (error: any) => {
+  if (!error?.code) {
+    return 'No se pudo ingresar. Revisa la conexion e intenta nuevamente.';
+  }
+
+  if (error.code === ADMIN_ACCESS_ERROR_CODE) {
+    return ADMIN_ACCESS_ERROR_MESSAGE;
+  }
+
+  if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+    return 'Email o contrasena incorrectos. Revisa los datos o restablece la clave desde Firebase Authentication.';
+  }
+
+  if (error.code === 'auth/operation-not-allowed') {
+    return "Para ingresar, habilita los proveedores 'Google' y/o 'Correo electronico/Contrasena' en Firebase Authentication.";
+  }
+
+  if (error.code === 'auth/too-many-requests') {
+    return 'Firebase bloqueo temporalmente los intentos de ingreso. Espera unos minutos y proba de nuevo.';
+  }
+
+  if (error.code === 'auth/popup-blocked') {
+    return 'El navegador bloqueo la ventana emergente de Google. Habilitala e intenta de nuevo.';
+  }
+
+  if (error.code === 'auth/cancelled-popup-request') {
+    return 'Ya hay un intento de ingreso con Google en curso.';
+  }
+
+  if (error.code === 'auth/popup-closed-by-user') {
+    return '';
+  }
+
+  return 'No se pudo ingresar. Revisa la conexion e intenta nuevamente.';
+};
+
 export default function Admin() {
   const navigate = useNavigate();
   const tabBarRef = useRef<HTMLDivElement | null>(null);
@@ -181,8 +286,10 @@ export default function Admin() {
     shareSlotTimes: [...SHARE_SLOT_TIMES],
   }));
   const [tab, setTab] = useState<AdminTabId>('turnos');
-  const [email, setEmail] = useState('milagros@minimilagros.com');
+  const [email, setEmail] = useState(PRIMARY_ADMIN_EMAIL);
   const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState<'email' | 'google' | null>(null);
   const [uploadingGalleryIndex, setUploadingGalleryIndex] = useState<number | null>(null);
   const [uploadingShareBackground, setUploadingShareBackground] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -196,11 +303,24 @@ export default function Admin() {
   const [savingEmployee, setSavingEmployee] = useState(false);
   const [employeeSaveError, setEmployeeSaveError] = useState('');
   const [employeeSaveNotice, setEmployeeSaveNotice] = useState('');
+  const [selectedAppointmentsDate, setSelectedAppointmentsDate] = useState(getTodayDateKey);
+  const [editingAppointmentId, setEditingAppointmentId] = useState<string | null>(null);
+  const [editingAppointmentDraft, setEditingAppointmentDraft] = useState<EditingAppointmentDraft | null>(null);
+  const [savingAppointment, setSavingAppointment] = useState(false);
+  const [appointmentSaveError, setAppointmentSaveError] = useState('');
+  const isAdmin = isAdminUser(user);
+  const isAuthenticating = authLoading !== null;
 
   useEffect(() => {
-    const unsubAuth = auth.onAuthStateChanged(u => setUser(u));
+    const unsubAuth = auth.onAuthStateChanged((currentUser) => setUser(currentUser));
     return () => unsubAuth();
   }, []);
+
+  useEffect(() => {
+    if (isAdmin) {
+      setAuthError('');
+    }
+  }, [isAdmin]);
 
   useEffect(() => {
     const activeTabButton = tabBarRef.current?.querySelector<HTMLElement>(`[data-admin-tab="${tab}"]`);
@@ -208,7 +328,7 @@ export default function Admin() {
   }, [tab]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !isAdminUser(user)) return;
 
     const ensureDefaultEmployee = async () => {
       const employeeRef = doc(db, 'employees', DEFAULT_EMPLOYEE_ID);
@@ -231,9 +351,9 @@ export default function Admin() {
             updatedAt: now,
           });
         }
-      } catch (e) {
+      } catch (error) {
         try {
-          handleFirestoreError(e, OperationType.WRITE, 'employees/milagros');
+          handleFirestoreError(error, OperationType.WRITE, 'employees/milagros');
         } catch {
           // Keep the panel available even if seeding the default employee fails.
         }
@@ -242,17 +362,17 @@ export default function Admin() {
 
     void ensureDefaultEmployee();
 
-    const unsubServices = onSnapshot(collection(db, 'services'), snap => {
-      setServices(snap.docs.map(d => ({ id: d.id, ...d.data() } as Service)));
-    }, err => handleFirestoreError(err, OperationType.LIST, 'services'));
+    const unsubServices = onSnapshot(collection(db, 'services'), (snapshot) => {
+      setServices(snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() } as Service)));
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'services'));
 
-    const unsubAppts = onSnapshot(query(collection(db, 'appointments')), snap => {
-      setAppointments(snap.docs.map(d => ({ id: d.id, ...d.data() } as Appointment)));
-    }, err => handleFirestoreError(err, OperationType.LIST, 'appointments'));
+    const unsubAppointments = onSnapshot(query(collection(db, 'appointments')), (snapshot) => {
+      setAppointments(snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() } as Appointment)));
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'appointments'));
 
-    const unsubEmployees = onSnapshot(collection(db, 'employees'), snap => {
-      setEmployees(withDefaultEmployee(snap.docs.map(d => ({ id: d.id, ...d.data() } as Employee))));
-    }, err => handleFirestoreError(err, OperationType.LIST, 'employees'));
+    const unsubEmployees = onSnapshot(collection(db, 'employees'), (snapshot) => {
+      setEmployees(withDefaultEmployee(snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() } as Employee))));
+    }, (error) => handleFirestoreError(error, OperationType.LIST, 'employees'));
 
     const unsubSettings = onSnapshot(doc(db, 'settings', 'global'), snap => {
       if (!snap.exists()) return;
@@ -262,7 +382,7 @@ export default function Admin() {
 
     return () => {
       unsubServices();
-      unsubAppts();
+      unsubAppointments();
       unsubEmployees();
       unsubSettings();
     };
@@ -276,10 +396,78 @@ export default function Admin() {
   const [serviceImageErrors, setServiceImageErrors] = useState<Record<string, string>>({});
   const [serviceImageNotice, setServiceImageNotice] = useState('');
   const employeeOptions = withDefaultEmployee(employees);
+  const sortedServices = [...services].sort((a, b) => a.name.localeCompare(b.name));
+  const selectedDateAppointments = appointments
+    .filter((appointment) => appointment.date === selectedAppointmentsDate)
+    .sort((a, b) => {
+      const timeDiff = a.startTime.localeCompare(b.startTime);
+      if (timeDiff !== 0) return timeDiff;
+      return a.clientFirstName.localeCompare(b.clientFirstName);
+    });
+
+  const resetAppointmentEditor = () => {
+    setEditingAppointmentId(null);
+    setEditingAppointmentDraft(null);
+    setAppointmentSaveError('');
+  };
+
+  const changeSelectedAppointmentsDate = (nextDate: string) => {
+    setSelectedAppointmentsDate(nextDate);
+    resetAppointmentEditor();
+  };
 
   const findEmployee = (employeeId?: string) => (
     employeeOptions.find((employee) => employee.id === (employeeId || DEFAULT_EMPLOYEE_ID))
   );
+
+  const resolveDraftService = (draft: EditingAppointmentDraft, sourceAppointment?: Appointment | null) => {
+    const service = services.find((entry) => entry.id === draft.serviceId);
+    if (service) return service;
+
+    if (sourceAppointment && sourceAppointment.serviceId === draft.serviceId) {
+      return {
+        id: sourceAppointment.serviceId,
+        name: sourceAppointment.serviceName,
+        durationMinutes: sourceAppointment.durationMinutes,
+        price: sourceAppointment.price,
+        isActive: true,
+        createdAt: sourceAppointment.createdAt,
+        employeeId: getEmployeeIdWithFallback(sourceAppointment),
+        employeeName: getEmployeeNameWithFallback(sourceAppointment),
+      } as Service;
+    }
+
+    return null;
+  };
+
+  const resolveDraftEmployee = (draft: EditingAppointmentDraft, sourceAppointment?: Appointment | null) => {
+    const employee = findEmployee(draft.employeeId);
+    if (employee) return employee;
+
+    if (sourceAppointment && getEmployeeIdWithFallback(sourceAppointment) === draft.employeeId) {
+      return {
+        id: draft.employeeId,
+        name: getEmployeeNameWithFallback(sourceAppointment),
+        createdAt: sourceAppointment.createdAt,
+        updatedAt: sourceAppointment.createdAt,
+      } as Employee;
+    }
+
+    return null;
+  };
+
+  const beginAppointmentEdit = (appointment: Appointment) => {
+    setEditingAppointmentId(appointment.id);
+    setEditingAppointmentDraft(toEditingAppointmentDraft(appointment));
+    setAppointmentSaveError('');
+  };
+
+  const updateAppointmentDraft = (patch: Partial<EditingAppointmentDraft>) => {
+    setEditingAppointmentDraft((current) => (
+      current ? { ...current, ...patch } : current
+    ));
+    setAppointmentSaveError('');
+  };
 
   const getServiceAssignedEmployeeName = (service: Service) => {
     const employeeId = getEmployeeIdWithFallback(service);
@@ -351,10 +539,10 @@ export default function Admin() {
 
       setEditingEmployeeId(null);
       setEmployeeNameDraft('');
-    } catch (e) {
+    } catch (error) {
       setEmployeeSaveError('No se pudo guardar la empleada. Revisa permisos o conexion e intenta de nuevo.');
       try {
-        handleFirestoreError(e, OperationType.WRITE, 'employees');
+        handleFirestoreError(error, OperationType.WRITE, 'employees');
       } catch {
         // Keep the employee form available after logging the Firestore context.
       }
@@ -376,10 +564,10 @@ export default function Admin() {
       await deleteDoc(doc(db, 'employees', employee.id));
       if (editingEmployeeId === employee.id) resetEmployeeForm();
       setEmployeeSaveNotice('Empleada eliminada.');
-    } catch (e) {
+    } catch (error) {
       setEmployeeSaveError('No se pudo eliminar la empleada. Revisa permisos o conexion e intenta de nuevo.');
       try {
-        handleFirestoreError(e, OperationType.DELETE, `employees/${employee.id}`);
+        handleFirestoreError(error, OperationType.DELETE, `employees/${employee.id}`);
       } catch {
         // Keep the employee list available after logging the Firestore context.
       }
@@ -493,7 +681,7 @@ export default function Admin() {
         service.id,
         isPermissionError
           ? 'No tenes permisos para guardar esta imagen. Revisa reglas de Storage y Firestore.'
-          : 'No se pudo guardar la imagen. Revisa la conexion e intenta de nuevo.'
+          : 'No se pudo guardar la imagen. Revisa la conexion e intenta de nuevo.',
       );
     } finally {
       setSavingImageFor(null);
@@ -508,17 +696,17 @@ export default function Admin() {
     const price = parseLocalizedNumber(editingService.price);
 
     if (!name) {
-      setServiceSaveError('Completá el nombre del servicio.');
+      setServiceSaveError('Completa el nombre del servicio.');
       return;
     }
 
     if (durationMinutes === null || durationMinutes <= 0) {
-      setServiceSaveError('La duración debe ser un número mayor a 0.');
+      setServiceSaveError('La duracion debe ser un numero mayor a 0.');
       return;
     }
 
     if (price === null || price < 0) {
-      setServiceSaveError('El precio debe ser un número válido.');
+      setServiceSaveError('El precio debe ser un numero valido.');
       return;
     }
 
@@ -544,10 +732,10 @@ export default function Admin() {
         });
       }
       setEditingService(null);
-    } catch (e) {
-      setServiceSaveError('No se pudo guardar el servicio. Revisá permisos o conexión e intentá de nuevo.');
+    } catch (error) {
+      setServiceSaveError('No se pudo guardar el servicio. Revisa permisos o conexion e intenta de nuevo.');
       try {
-        handleFirestoreError(e, OperationType.WRITE, 'services');
+        handleFirestoreError(error, OperationType.WRITE, 'services');
       } catch {
         // Keep the admin panel open after logging the Firestore context.
       }
@@ -559,8 +747,8 @@ export default function Admin() {
   const deleteService = async (id: string) => {
     try {
       await deleteDoc(doc(db, 'services', id));
-    } catch (e) {
-      handleFirestoreError(e, OperationType.DELETE, `services/${id}`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `services/${id}`);
     }
   };
 
@@ -640,16 +828,16 @@ export default function Admin() {
         }
       }
       return true;
-    } catch (e: any) {
-      console.error('Settings save error', e);
-      const message = getSettingsSaveErrorMessage(e);
+    } catch (error: any) {
+      console.error('Settings save error', error);
+      const message = getSettingsSaveErrorMessage(error);
       if (saveContext === 'share') {
         setShareSettingsSaveError(message);
       } else {
         setSettingsSaveError(message);
       }
       try {
-        handleFirestoreError(e, OperationType.WRITE, 'settings/global');
+        handleFirestoreError(error, OperationType.WRITE, 'settings/global');
       } catch {
         // Keep the admin panel open while still logging the Firestore context.
       }
@@ -777,8 +965,8 @@ export default function Admin() {
       if (!saved) {
         alert('La imagen se subio, pero no se pudo guardar en la configuracion. Usa Guardar Configuracion para reintentar.');
       }
-    } catch (e) {
-      console.error('Gallery upload error', e);
+    } catch (error) {
+      console.error('Gallery upload error', error);
       alert('No se pudo subir la imagen. Verifica Firebase Storage e intenta nuevamente.');
     } finally {
       setUploadingGalleryIndex(null);
@@ -830,11 +1018,167 @@ export default function Admin() {
     }
   };
 
-  const actAppt = async (id: string, status: 'confirmed' | 'cancelled') => {
+  const saveAppointment = async () => {
+    if (!editingAppointmentId || !editingAppointmentDraft) return;
+
+    const sourceAppointment = appointments.find((appointment) => appointment.id === editingAppointmentId);
+    if (!sourceAppointment) {
+      setAppointmentSaveError('El turno ya no existe o fue actualizado en otra sesion.');
+      return;
+    }
+
+    const service = resolveDraftService(editingAppointmentDraft, sourceAppointment);
+    if (!service) {
+      setAppointmentSaveError('Selecciona un servicio valido antes de guardar.');
+      return;
+    }
+
+    const employee = resolveDraftEmployee(editingAppointmentDraft, sourceAppointment);
+    if (!employee) {
+      setAppointmentSaveError('Selecciona una empleada valida antes de guardar.');
+      return;
+    }
+
+    const clientFirstName = editingAppointmentDraft.clientFirstName.trim();
+    const clientLastName = editingAppointmentDraft.clientLastName.trim();
+    const date = editingAppointmentDraft.date.trim();
+    const startTime = editingAppointmentDraft.startTime.trim();
+
+    if (!clientFirstName || !clientLastName) {
+      setAppointmentSaveError('Completa nombre y apellido del cliente.');
+      return;
+    }
+
+    if (!isValidDateKey(date)) {
+      setAppointmentSaveError('Selecciona una fecha valida.');
+      return;
+    }
+
+    if (!isValidTimeValue(startTime)) {
+      setAppointmentSaveError('Selecciona una hora valida.');
+      return;
+    }
+
+    const appointmentDate = parseDateKey(date);
+    if (!isBusinessDay(appointmentDate)) {
+      setAppointmentSaveError('Solo se permiten turnos de lunes a sabado.');
+      return;
+    }
+
+    const businessStartMinutes = getTimeValueMinutes(BUSINESS_START_TIME);
+    const businessEndMinutes = getTimeValueMinutes(BUSINESS_END_TIME);
+    const startMinutes = getTimeValueMinutes(startTime);
+    const endMinutes = startMinutes + service.durationMinutes;
+
+    if (startMinutes < businessStartMinutes || endMinutes > businessEndMinutes) {
+      setAppointmentSaveError(`El horario debe quedar dentro del rango ${BUSINESS_START_TIME} a ${BUSINESS_END_TIME}.`);
+      return;
+    }
+
+    const endTime = format(
+      addMinutes(parse(startTime, 'HH:mm', appointmentDate), service.durationMinutes),
+      'HH:mm',
+    );
+
+    if (editingAppointmentDraft.status !== 'cancelled') {
+      const overlappingAppointment = appointments.find((appointment) => {
+        if (appointment.id === editingAppointmentId) return false;
+        if (appointment.date !== date) return false;
+        if (getEmployeeIdWithFallback(appointment) !== employee.id) return false;
+        if (appointment.status !== 'pending' && appointment.status !== 'confirmed') return false;
+        if (!isValidTimeValue(appointment.startTime) || !isValidTimeValue(appointment.endTime)) return false;
+
+        const appointmentStartMinutes = getTimeValueMinutes(appointment.startTime);
+        const appointmentEndMinutes = getTimeValueMinutes(appointment.endTime);
+        return startMinutes < appointmentEndMinutes && appointmentStartMinutes < endMinutes;
+      });
+
+      if (overlappingAppointment) {
+        setAppointmentSaveError(
+          `Se superpone con el turno de ${overlappingAppointment.clientFirstName} ${overlappingAppointment.clientLastName} (${overlappingAppointment.startTime} - ${overlappingAppointment.endTime}) para ${employee.name}.`,
+        );
+        return;
+      }
+    }
+
+    try {
+      setSavingAppointment(true);
+      setAppointmentSaveError('');
+
+      await updateDoc(doc(db, 'appointments', editingAppointmentId), {
+        serviceId: service.id,
+        serviceName: service.name,
+        durationMinutes: service.durationMinutes,
+        price: service.price,
+        date,
+        startTime,
+        endTime,
+        clientFirstName,
+        clientLastName,
+        status: editingAppointmentDraft.status,
+        depositAmount: settings.depositAmount,
+        employeeId: employee.id,
+        employeeName: employee.name,
+      });
+
+      setSelectedAppointmentsDate(date);
+      resetAppointmentEditor();
+    } catch (error) {
+      setAppointmentSaveError('No se pudo guardar el turno. Revisa permisos o conexion e intenta de nuevo.');
+      try {
+        handleFirestoreError(error, OperationType.UPDATE, `appointments/${editingAppointmentId}`);
+      } catch {
+        // Keep the appointment editor open after logging the Firestore context.
+      }
+    } finally {
+      setSavingAppointment(false);
+    }
+  };
+
+  const actAppt = async (id: string, status: Appointment['status']) => {
+    const appointment = appointments.find((entry) => entry.id === id);
+    if (!appointment) return;
+
+    if (status !== 'cancelled') {
+      const employeeId = getEmployeeIdWithFallback(appointment);
+      const startTime = appointment.startTime;
+      const endTime = appointment.endTime;
+
+      if (!isValidTimeValue(startTime) || !isValidTimeValue(endTime)) {
+        alert('El turno tiene un horario invalido. Editalo antes de cambiar el estado.');
+        return;
+      }
+
+      const startMinutes = getTimeValueMinutes(startTime);
+      const endMinutes = getTimeValueMinutes(endTime);
+      const overlappingAppointment = appointments.find((entry) => {
+        if (entry.id === id) return false;
+        if (entry.date !== appointment.date) return false;
+        if (getEmployeeIdWithFallback(entry) !== employeeId) return false;
+        if (entry.status !== 'pending' && entry.status !== 'confirmed') return false;
+        if (!isValidTimeValue(entry.startTime) || !isValidTimeValue(entry.endTime)) return false;
+
+        const entryStartMinutes = getTimeValueMinutes(entry.startTime);
+        const entryEndMinutes = getTimeValueMinutes(entry.endTime);
+        return startMinutes < entryEndMinutes && entryStartMinutes < endMinutes;
+      });
+
+      if (overlappingAppointment) {
+        alert(
+          `No se puede cambiar el estado porque se superpone con ${overlappingAppointment.clientFirstName} ${overlappingAppointment.clientLastName} (${overlappingAppointment.startTime} - ${overlappingAppointment.endTime}).`,
+        );
+        return;
+      }
+    }
     try {
       await updateDoc(doc(db, 'appointments', id), { status });
-    } catch (e) {
-      handleFirestoreError(e, OperationType.UPDATE, `appointments/${id}`);
+      if (editingAppointmentId === id) {
+        setEditingAppointmentDraft((current) => (
+          current ? { ...current, status } : current
+        ));
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `appointments/${id}`);
     }
   };
 
@@ -851,44 +1195,50 @@ export default function Admin() {
       { name: 'Tratamientos capilares', durationMinutes: 90, price: 12000 },
       { name: 'Hidra lips', durationMinutes: 45, price: 9000 },
     ];
-    for (const bs of baseServices) {
+
+    for (const baseService of baseServices) {
       await addDoc(collection(db, 'services'), {
-        ...bs,
+        ...baseService,
         employeeId: DEFAULT_EMPLOYEE_ID,
         employeeName: DEFAULT_EMPLOYEE_NAME,
         isActive: true,
         createdAt: new Date().toISOString(),
       });
     }
+
     alert('Servicios base cargados');
   };
 
-  const handleLogin = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleLogin = async (event: FormEvent) => {
+    event.preventDefault();
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail || !password) return;
 
     try {
+      setAuthLoading('email');
+      setAuthError('');
       await loginWithEmail(normalizedEmail, password);
-    } catch (err: any) {
-      console.error('Login error', err);
+    } catch (error: any) {
+      console.error('Login error', error);
+      setAuthError(getAuthErrorMessage(error));
+    } finally {
+      setAuthLoading(null);
+    }
+  };
 
-      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
-        alert('Email o contrasena incorrectos. Revisa los datos o restablece la clave desde Firebase Authentication.');
-        return;
+  const handleGoogleLogin = async () => {
+    try {
+      setAuthLoading('google');
+      setAuthError('');
+      await loginWithGoogle();
+    } catch (error: any) {
+      console.error('Google login error', error);
+      const nextError = getAuthErrorMessage(error);
+      if (nextError) {
+        setAuthError(nextError);
       }
-
-      if (err.code === 'auth/operation-not-allowed') {
-        alert("Para ingresar, habilita el proveedor 'Correo electronico/Contrasena' en Firebase Authentication.");
-        return;
-      }
-
-      if (err.code === 'auth/too-many-requests') {
-        alert('Firebase bloqueo temporalmente los intentos de ingreso. Espera unos minutos y proba de nuevo.');
-        return;
-      }
-
-      alert('No se pudo ingresar. Revisa la conexion e intenta nuevamente.');
+    } finally {
+      setAuthLoading(null);
     }
   };
 
@@ -898,16 +1248,60 @@ export default function Admin() {
     setTab(ADMIN_TABS[nextIndex].id);
   };
 
+  const selectedAppointmentsDateLabel = formatDateKeyLabel(selectedAppointmentsDate);
+
+  if (user && !isAdmin) {
+    return (
+      <Layout>
+        <div className="text-center py-10 bg-background border border-error-container rounded-[20px] shadow-sm max-w-md mx-auto space-y-4 px-6">
+          <h1 className="text-[24px] font-serif text-primary">Acceso restringido</h1>
+          <p className="text-sm text-on-surface-variant">
+            La cuenta <span className="font-medium text-on-surface">{user.email || 'actual'}</span> no tiene permisos de administracion.
+          </p>
+          <p className="text-sm text-on-surface-variant">
+            Ingresa con una cuenta administradora: <span className="font-medium text-on-surface">{ADMIN_EMAILS_LABEL}</span>.
+          </p>
+          <button
+            type="button"
+            onClick={() => void logout()}
+            className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium shadow-sm hover:opacity-90 transition-all"
+          >
+            Salir
+          </button>
+        </div>
+      </Layout>
+    );
+  }
+
   if (!user) {
     return (
       <Layout>
         <div className="text-center py-10 bg-background border border-primary-container rounded-[20px] shadow-sm max-w-sm mx-auto">
           <h1 className="text-[24px] font-serif text-primary mb-6">Acceso a Gestor</h1>
+          <p className="px-6 mb-4 text-sm text-on-surface-variant">
+            Pueden ingresar las cuentas administradoras <span className="font-medium text-on-surface">{ADMIN_EMAILS_LABEL}</span>.
+          </p>
+          {authError && (
+            <div role="alert" className="mx-6 mb-4 rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
+              {authError}
+            </div>
+          )}
+          <div className="px-6 mb-4">
+            <button
+              type="button"
+              onClick={() => void handleGoogleLogin()}
+              disabled={isAuthenticating}
+              className="w-full rounded-xl border border-outline-variant bg-white px-4 py-3 font-medium text-on-surface shadow-sm transition-all hover:bg-surface-container-highest disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {authLoading === 'google' ? 'Ingresando con Google...' : 'Ingresar con Google'}
+            </button>
+          </div>
+          <div className="px-6 mb-4 text-xs uppercase tracking-[2px] text-on-surface-variant">o con email y contrasena</div>
           <form onSubmit={handleLogin} className="flex flex-col gap-4 px-6 mb-4">
-            <input type="email" autoComplete="username" value={email} onChange={e => setEmail(e.target.value)} className="bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Tu Email" required />
-            <input type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} className="bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Contrasena" required />
-            <button type="submit" className="bg-primary-dim text-white py-3 rounded-xl font-medium shadow-sm hover:opacity-90 transition-all mt-2">
-              Ingresar a la cuenta
+            <input type="email" autoComplete="username" value={email} onChange={(e) => { setEmail(e.target.value); setAuthError(''); }} className="bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Tu Email" required />
+            <input type="password" autoComplete="current-password" value={password} onChange={(e) => { setPassword(e.target.value); setAuthError(''); }} className="bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface" placeholder="Contrasena" required />
+            <button type="submit" disabled={isAuthenticating} className="bg-primary-dim text-white py-3 rounded-xl font-medium shadow-sm hover:opacity-90 transition-all mt-2 disabled:cursor-not-allowed disabled:opacity-60">
+              {authLoading === 'email' ? 'Ingresando...' : 'Ingresar a la cuenta'}
             </button>
           </form>
         </div>
@@ -921,7 +1315,7 @@ export default function Admin() {
         <h1 className="text-2xl font-serif text-primary">Panel Dinamico</h1>
         <div className="flex items-center gap-4">
           <button onClick={() => navigate('/')} className="text-sm text-on-surface-variant font-medium underline">Ir al inicio</button>
-          <button onClick={logout} className="text-sm text-on-surface-variant font-medium underline">Salir</button>
+          <button onClick={() => void logout()} className="text-sm text-on-surface-variant font-medium underline">Salir</button>
         </div>
       </div>
 
@@ -1076,7 +1470,7 @@ export default function Admin() {
                         <input
                           type="file"
                           accept="image/jpeg,image/png,image/webp"
-                          onChange={e => void uploadGalleryImage(index, e.target.files?.[0] ?? null)}
+                          onChange={(e) => void uploadGalleryImage(index, e.target.files?.[0] ?? null)}
                           className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface file:mr-3 file:border-0 file:bg-primary-container file:text-primary file:px-3 file:py-2 file:rounded-lg file:font-medium"
                         />
                       </label>
@@ -1085,7 +1479,7 @@ export default function Admin() {
                         <input
                           type="url"
                           value={img.src}
-                          onChange={e => updateGalleryImage(index, 'src', e.target.value)}
+                          onChange={(e) => updateGalleryImage(index, 'src', e.target.value)}
                           className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface"
                           placeholder="https://..."
                         />
@@ -1097,7 +1491,7 @@ export default function Admin() {
                     <input
                       type="text"
                       value={img.alt}
-                      onChange={e => updateGalleryImage(index, 'alt', e.target.value)}
+                      onChange={(e) => updateGalleryImage(index, 'alt', e.target.value)}
                       className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface"
                       placeholder="Texto alternativo (ej. Manicura)"
                     />
@@ -1146,7 +1540,7 @@ export default function Admin() {
                 type="text"
                 placeholder="Nombre de la empleada"
                 value={employeeNameDraft}
-                onChange={e => { setEmployeeNameDraft(e.target.value); setEmployeeSaveError(''); setEmployeeSaveNotice(''); }}
+                onChange={(e) => { setEmployeeNameDraft(e.target.value); setEmployeeSaveError(''); setEmployeeSaveNotice(''); }}
                 className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
               />
               <div className="flex gap-3">
@@ -1213,12 +1607,12 @@ export default function Admin() {
                     {serviceSaveError}
                   </div>
                 )}
-                <input type="text" placeholder="Nombre (ej. Esmaltado)" value={editingService.name || ''} onChange={e => { setEditingService({ ...editingService, name: e.target.value }); setServiceSaveError(''); }} className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                <input type="text" placeholder="Nombre (ej. Esmaltado)" value={editingService.name || ''} onChange={(e) => { setEditingService({ ...editingService, name: e.target.value }); setServiceSaveError(''); }} className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3" />
                 <label className="block">
                   <span className="block text-sm font-medium text-primary mb-2">Empleada</span>
                   <select
                     value={editingService.employeeId || DEFAULT_EMPLOYEE_ID}
-                    onChange={e => {
+                    onChange={(e) => {
                       const selectedEmployee = findEmployee(e.target.value) || DEFAULT_EMPLOYEE;
                       setEditingService({
                         ...editingService,
@@ -1235,11 +1629,11 @@ export default function Admin() {
                   </select>
                 </label>
                 <div className="flex gap-4">
-                  <input type="text" inputMode="numeric" placeholder="Minutos (ej. 35)" value={editingService.durationMinutes || ''} onChange={e => { setEditingService({ ...editingService, durationMinutes: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
-                  <input type="text" inputMode="decimal" placeholder="Precio ($)" value={editingService.price || ''} onChange={e => { setEditingService({ ...editingService, price: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                  <input type="text" inputMode="numeric" placeholder="Minutos (ej. 35)" value={editingService.durationMinutes || ''} onChange={(e) => { setEditingService({ ...editingService, durationMinutes: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
+                  <input type="text" inputMode="decimal" placeholder="Precio ($)" value={editingService.price || ''} onChange={(e) => { setEditingService({ ...editingService, price: e.target.value }); setServiceSaveError(''); }} className="w-1/2 bg-white border border-outline-variant rounded-xl px-4 py-3" />
                 </div>
                 <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={editingService.isActive} onChange={e => setEditingService({ ...editingService, isActive: e.target.checked })} className="rounded text-primary focus:ring-primary" />
+                  <input type="checkbox" checked={editingService.isActive} onChange={(e) => setEditingService({ ...editingService, isActive: e.target.checked })} className="rounded text-primary focus:ring-primary" />
                   <span className="text-sm">Activo (visible)</span>
                 </label>
               </div>
@@ -1253,16 +1647,16 @@ export default function Admin() {
           )}
 
           <div className="space-y-4">
-            {services.map(s => (
-              <div key={s.id} className="bg-background border border-primary-container p-4 rounded-[16px] flex justify-between items-center">
+            {services.map((service) => (
+              <div key={service.id} className="bg-background border border-primary-container p-4 rounded-[16px] flex justify-between items-center">
                 <div>
-                  <h4 className="font-sans font-medium text-[15px] text-primary mb-1">{s.name}</h4>
-                  <p className="text-[12px] text-on-surface-variant font-light">Atiende: {getServiceAssignedEmployeeName(s)}</p>
-                  <span className="text-[12px] text-on-surface-variant font-light">{s.durationMinutes} min • ${s.price.toLocaleString('es-AR')}</span>
+                  <h4 className="font-sans font-medium text-[15px] text-primary mb-1">{service.name}</h4>
+                  <p className="text-[12px] text-on-surface-variant font-light">Atiende: {getServiceAssignedEmployeeName(service)}</p>
+                  <span className="text-[12px] text-on-surface-variant font-light">{service.durationMinutes} min - ${service.price.toLocaleString('es-AR')}</span>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => { setEditingService(toEditingService(s)); setServiceSaveError(''); }} className="p-2 text-primary-dim hover:text-primary transition-colors bg-primary-container rounded-lg"><span className="material-symbols-outlined text-[18px]">edit</span></button>
-                  <button onClick={() => deleteService(s.id)} className="p-2 text-error bg-error-container rounded-lg"><span className="material-symbols-outlined text-[18px]">delete</span></button>
+                  <button onClick={() => { setEditingService(toEditingService(service)); setServiceSaveError(''); }} className="p-2 text-primary-dim hover:text-primary transition-colors bg-primary-container rounded-lg"><span className="material-symbols-outlined text-[18px]">edit</span></button>
+                  <button onClick={() => void deleteService(service.id)} className="p-2 text-error bg-error-container rounded-lg"><span className="material-symbols-outlined text-[18px]">delete</span></button>
                 </div>
               </div>
             ))}
@@ -1331,7 +1725,7 @@ export default function Admin() {
                             <input
                               type="url"
                               value={draft.url}
-                              onChange={e => updateServiceImageDraft(service.id, { url: e.target.value })}
+                              onChange={(e) => updateServiceImageDraft(service.id, { url: e.target.value })}
                               className="w-full bg-white border border-outline-variant focus:border-primary focus:ring-0 rounded-xl px-4 py-3 text-on-surface"
                               placeholder="https://..."
                             />
@@ -1340,7 +1734,7 @@ export default function Admin() {
                               <input
                                 type="file"
                                 accept="image/jpeg,image/png,image/webp"
-                                onChange={e => updateServiceImageDraft(service.id, { file: e.target.files?.[0] || null })}
+                                onChange={(e) => updateServiceImageDraft(service.id, { file: e.target.files?.[0] || null })}
                                 className="w-full rounded-xl border border-outline-variant bg-white px-4 py-3 text-sm text-on-surface file:mr-4 file:rounded-lg file:border-0 file:bg-primary-container file:px-3 file:py-2 file:text-sm file:font-medium file:text-primary"
                               />
                               {draft.file && (
@@ -1357,7 +1751,7 @@ export default function Admin() {
 
                           <button
                             type="button"
-                            onClick={() => saveServiceImage(service)}
+                            onClick={() => void saveServiceImage(service)}
                             disabled={isSaving}
                             className="bg-primary-dim text-white py-3 px-6 rounded-xl font-medium w-full sm:w-auto disabled:opacity-60 disabled:cursor-not-allowed"
                           >
@@ -1376,31 +1770,227 @@ export default function Admin() {
 
       {tab === 'turnos' && (
         <div className="space-y-4">
-          {appointments.sort((a, b) => new Date(`${b.date}T${b.startTime}`).getTime() - new Date(`${a.date}T${a.startTime}`).getTime()).map(appt => (
-            <div key={appt.id} className={`p-4 rounded-[16px] border ${appt.status === 'pending' ? 'bg-background border-outline-variant shadow-sm' : appt.status === 'confirmed' ? 'bg-primary-container border-primary-dim' : 'bg-surface-container-highest border-transparent opacity-60'}`}>
-              <div className="flex justify-between items-start mb-2">
-                <div>
-                  <p className="font-serif text-[18px] tracking-tight text-primary">{appt.clientFirstName} {appt.clientLastName}</p>
-                  <p className="text-[13px] text-on-surface-variant font-medium">{appt.serviceName}</p>
-                  <p className="text-[12px] text-on-surface-variant">Atiende: {getEmployeeNameWithFallback(appt)}</p>
-                </div>
-                <div className="text-right">
-                  <p className="font-bold text-[14px] text-primary">{format(new Date(appt.date), 'dd/MM/yyyy')}</p>
-                  <p className="text-[12px] text-on-surface-variant font-medium">{appt.startTime} - {appt.endTime}</p>
-                </div>
+          <div className="bg-background border border-primary-container p-5 rounded-[16px] shadow-sm">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <h2 className="font-serif text-[20px] text-primary">Turnos del dia</h2>
+                <p className="text-sm text-on-surface-variant mt-1">
+                  {selectedDateAppointments.length} turno{selectedDateAppointments.length === 1 ? '' : 's'} para el {selectedAppointmentsDateLabel}.
+                </p>
               </div>
-              <div className="flex justify-between items-center mt-4">
-                <span className="text-[10px] uppercase tracking-[2px] font-bold px-2 py-1 rounded bg-white text-primary">{appt.status}</span>
-                {appt.status === 'pending' && (
-                  <div className="flex gap-2">
-                    <button onClick={() => actAppt(appt.id, 'confirmed')} className="text-xs bg-primary-dim text-white font-medium px-4 py-2 rounded-lg hover:opacity-90 transition-opacity">Confirmar</button>
-                    <button onClick={() => actAppt(appt.id, 'cancelled')} className="text-xs bg-white text-on-surface border border-outline-variant font-medium px-4 py-2 rounded-lg hover:bg-surface-container-highest transition-colors">Cancelar</button>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                <div className="inline-flex items-center rounded-xl border border-outline-variant bg-white p-1">
+                  <button
+                    type="button"
+                    onClick={() => changeSelectedAppointmentsDate(shiftDateKey(selectedAppointmentsDate, -1))}
+                    className="rounded-lg px-3 py-2 text-sm font-medium text-on-surface-variant hover:bg-surface-container-highest"
+                  >
+                    <span className="material-symbols-outlined text-[18px] align-middle">chevron_left</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => changeSelectedAppointmentsDate(getTodayDateKey())}
+                    className="rounded-lg px-3 py-2 text-sm font-medium text-primary hover:bg-primary-container"
+                  >
+                    Hoy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => changeSelectedAppointmentsDate(shiftDateKey(selectedAppointmentsDate, 1))}
+                    className="rounded-lg px-3 py-2 text-sm font-medium text-on-surface-variant hover:bg-surface-container-highest"
+                  >
+                    <span className="material-symbols-outlined text-[18px] align-middle">chevron_right</span>
+                  </button>
+                </div>
+                <label className="block">
+                  <span className="block text-sm font-medium text-primary mb-2">Fecha</span>
+                  <input
+                    type="date"
+                    value={selectedAppointmentsDate}
+                    onChange={(e) => changeSelectedAppointmentsDate(e.target.value || getTodayDateKey())}
+                    className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                  />
+                </label>
+              </div>
+            </div>
+          </div>
+
+          {selectedDateAppointments.map((appointment) => {
+            const isEditing = editingAppointmentId === appointment.id && editingAppointmentDraft !== null;
+            const draft = isEditing ? editingAppointmentDraft : null;
+            const draftService = draft ? resolveDraftService(draft, appointment) : null;
+            const draftEmployee = draft ? resolveDraftEmployee(draft, appointment) : null;
+            const selectedServiceMissing = Boolean(draft && draftService && !services.some((service) => service.id === draft.serviceId));
+            const selectedEmployeeMissing = Boolean(draft && draftEmployee && !employeeOptions.some((employee) => employee.id === draft.employeeId));
+            const draftEndTime = draft && draftService && isValidDateKey(draft.date) && isValidTimeValue(draft.startTime)
+              ? format(addMinutes(parse(draft.startTime, 'HH:mm', parseDateKey(draft.date)), draftService.durationMinutes), 'HH:mm')
+              : null;
+
+            return (
+              <div key={appointment.id} className={`p-4 rounded-[16px] border ${appointment.status === 'pending' ? 'bg-background border-outline-variant shadow-sm' : appointment.status === 'confirmed' ? 'bg-primary-container border-primary-dim' : 'bg-surface-container-highest border-transparent opacity-80'}`}>
+                <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <p className="font-serif text-[18px] tracking-tight text-primary">{appointment.clientFirstName} {appointment.clientLastName}</p>
+                    <p className="text-[13px] text-on-surface-variant font-medium">{appointment.serviceName}</p>
+                    <p className="text-[12px] text-on-surface-variant">Atiende: {getEmployeeNameWithFallback(appointment)}</p>
+                  </div>
+                  <div className="md:text-right">
+                    <p className="font-bold text-[14px] text-primary">{formatDateKeyLabel(appointment.date)}</p>
+                    <p className="text-[12px] text-on-surface-variant font-medium">{appointment.startTime} - {appointment.endTime}</p>
+                    <p className="text-[12px] text-on-surface-variant">Senia actual: ${appointment.depositAmount.toLocaleString('es-AR')}</p>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 mt-4 lg:flex-row lg:items-center lg:justify-between">
+                  <span className="text-[10px] uppercase tracking-[2px] font-bold px-2 py-1 rounded bg-white text-primary w-fit">
+                    {APPOINTMENT_STATUS_LABELS[appointment.status]}
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {(['pending', 'confirmed', 'cancelled'] as const).map((status) => (
+                      <button
+                        key={status}
+                        type="button"
+                        onClick={() => void actAppt(appointment.id, status)}
+                        disabled={appointment.status === status}
+                        className={`text-xs font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${appointment.status === status ? 'bg-white text-on-surface border border-outline-variant' : status === 'confirmed' ? 'bg-primary-dim text-white hover:opacity-90' : status === 'cancelled' ? 'bg-white text-on-surface border border-outline-variant hover:bg-surface-container-highest' : 'bg-secondary-container text-on-secondary-container hover:opacity-90'}`}
+                      >
+                        {APPOINTMENT_STATUS_LABELS[status]}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => (isEditing ? resetAppointmentEditor() : beginAppointmentEdit(appointment))}
+                      className="text-xs bg-primary-container text-primary font-medium px-4 py-2 rounded-lg hover:opacity-90 transition-opacity"
+                    >
+                      {isEditing ? 'Cerrar' : 'Editar'}
+                    </button>
+                  </div>
+                </div>
+
+                {isEditing && draft && (
+                  <div className="mt-4 border-t border-outline-variant pt-4 space-y-4">
+                    {appointmentSaveError && (
+                      <div role="alert" className="rounded-xl border border-error-container bg-error-container px-4 py-3 text-sm text-error">
+                        {appointmentSaveError}
+                      </div>
+                    )}
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block">
+                        <span className="block text-sm font-medium text-primary mb-2">Nombre</span>
+                        <input
+                          type="text"
+                          value={draft.clientFirstName}
+                          onChange={(e) => updateAppointmentDraft({ clientFirstName: e.target.value })}
+                          className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="block text-sm font-medium text-primary mb-2">Apellido</span>
+                        <input
+                          type="text"
+                          value={draft.clientLastName}
+                          onChange={(e) => updateAppointmentDraft({ clientLastName: e.target.value })}
+                          className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                        />
+                      </label>
+                      <label className="block md:col-span-2">
+                        <span className="block text-sm font-medium text-primary mb-2">Servicio</span>
+                        <select
+                          value={draft.serviceId}
+                          onChange={(e) => updateAppointmentDraft({ serviceId: e.target.value })}
+                          className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                        >
+                          {selectedServiceMissing && draftService && (
+                            <option value={draft.serviceId}>{draftService.name} (fuera del catalogo)</option>
+                          )}
+                          {sortedServices.map((service) => (
+                            <option key={service.id} value={service.id}>{service.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="block text-sm font-medium text-primary mb-2">Empleada</span>
+                        <select
+                          value={draft.employeeId}
+                          onChange={(e) => updateAppointmentDraft({ employeeId: e.target.value })}
+                          className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                        >
+                          {selectedEmployeeMissing && draftEmployee && (
+                            <option value={draft.employeeId}>{draftEmployee.name} (sin ficha activa)</option>
+                          )}
+                          {employeeOptions.map((employee) => (
+                            <option key={employee.id} value={employee.id}>{employee.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="block text-sm font-medium text-primary mb-2">Estado</span>
+                        <select
+                          value={draft.status}
+                          onChange={(e) => updateAppointmentDraft({ status: e.target.value as Appointment['status'] })}
+                          className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                        >
+                          {(['pending', 'confirmed', 'cancelled'] as const).map((status) => (
+                            <option key={status} value={status}>{APPOINTMENT_STATUS_LABELS[status]}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="block text-sm font-medium text-primary mb-2">Fecha</span>
+                        <input
+                          type="date"
+                          value={draft.date}
+                          onChange={(e) => updateAppointmentDraft({ date: e.target.value })}
+                          className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="block text-sm font-medium text-primary mb-2">Hora de inicio</span>
+                        <input
+                          type="time"
+                          step={1800}
+                          value={draft.startTime}
+                          onChange={(e) => updateAppointmentDraft({ startTime: e.target.value })}
+                          className="w-full bg-white border border-outline-variant rounded-xl px-4 py-3"
+                        />
+                      </label>
+                    </div>
+
+                    {draftService && draftEndTime && (
+                      <div className="rounded-xl border border-outline-variant bg-white px-4 py-3 text-sm text-on-surface-variant">
+                        Finaliza a las <span className="font-medium text-on-surface">{draftEndTime}</span> - {draftService.durationMinutes} min - ${draftService.price.toLocaleString('es-AR')}
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void saveAppointment()}
+                        disabled={savingAppointment}
+                        className="bg-primary-dim text-white font-medium py-2 px-6 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        {savingAppointment ? 'Guardando...' : 'Guardar cambios'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={resetAppointmentEditor}
+                        className="bg-surface-container-highest text-on-surface font-medium py-2 px-6 rounded-xl"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
-            </div>
-          ))}
-          {appointments.length === 0 && <p className="text-on-surface-variant bg-white border border-outline-variant rounded-xl p-4 text-center">No hay turnos registrados.</p>}
+            );
+          })}
+
+          {selectedDateAppointments.length === 0 && (
+            <p className="text-on-surface-variant bg-white border border-outline-variant rounded-xl p-4 text-center">
+              No hay turnos registrados para el {selectedAppointmentsDateLabel}.
+            </p>
+          )}
         </div>
       )}
     </Layout>

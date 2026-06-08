@@ -4,6 +4,7 @@ import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 import type { Appointment } from './types';
+import { ADMIN_ACCESS_ERROR_CODE, ADMIN_ACCESS_ERROR_MESSAGE, isAdminEmail, normalizeEmail } from './lib/adminAuth';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -118,31 +119,37 @@ export const savePublicPendingAppointment = async (
   return { method: 'rest' as const, id: result.id };
 };
 
-export const loginWithEmail = async (email: string, pass: string) => {
-  try {
-    return await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), pass);
-  } catch (error: any) {
-    if (
-      error?.code === 'auth/invalid-credential' ||
-      error?.code === 'auth/user-not-found' ||
-      error?.code === 'auth/wrong-password'
-    ) {
-      alert('Email o contrasena incorrectos. Revisa los datos o restablece la clave desde Firebase Authentication.');
-      return undefined;
-    }
+const buildAdminAccessError = () => {
+  const error = new Error(ADMIN_ACCESS_ERROR_MESSAGE) as Error & { code: string };
+  error.code = ADMIN_ACCESS_ERROR_CODE;
+  return error;
+};
 
-    throw error;
+const ensureAdminAccess = async <T extends { user: { email: string | null } }>(result: T) => {
+  if (isAdminEmail(result.user.email)) {
+    return result;
   }
+
+  await signOut(auth);
+  throw buildAdminAccessError();
+};
+
+export const loginWithEmail = async (email: string, pass: string) => {
+  const result = await signInWithEmailAndPassword(auth, normalizeEmail(email), pass);
+  return await ensureAdminAccess(result);
 };
 
 export const registerWithEmail = async (email: string, pass: string) => {
-  return await createUserWithEmailAndPassword(auth, email, pass);
+  return await createUserWithEmailAndPassword(auth, normalizeEmail(email), pass);
 };
 
 export const loginWithGoogle = async () => {
   const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+
   try {
-    await signInWithPopup(auth, provider);
+    const result = await signInWithPopup(auth, provider);
+    return await ensureAdminAccess(result);
   } catch (error) {
     console.error("Login err", error);
     throw error;
