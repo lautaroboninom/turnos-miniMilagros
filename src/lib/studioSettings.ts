@@ -23,11 +23,14 @@ export const DEFAULT_GALLERY_IMAGES: GalleryImage[] = [
 
 export const DEFAULT_SHARE_BACKGROUND_OVERLAY_OPACITY = 30;
 export const MAX_SHARE_BACKGROUND_OVERLAY_OPACITY = 70;
+// Legacy Firestore rules only allow galleryImages for share-only settings.
+const SHARE_SETTINGS_MARKER_ALT = '__mini_milagros_share_settings_v1__';
+const SHARE_SETTINGS_MARKER_SRC_PREFIX = 'data:application/json,';
 
 const sanitizeGalleryImages = (galleryImages: StudioSettings['galleryImages']) => {
   const normalizedGallery = (galleryImages ?? [])
     .map((img) => ({ src: (img?.src ?? '').trim(), alt: (img?.alt ?? '').trim() || 'Trabajo' }))
-    .filter((img) => img.src.length > 0);
+    .filter((img) => img.src.length > 0 && img.alt !== SHARE_SETTINGS_MARKER_ALT);
 
   return normalizedGallery.length > 0 ? normalizedGallery : DEFAULT_GALLERY_IMAGES;
 };
@@ -37,6 +40,49 @@ const isShareBackgroundSourceType = (
 ): value is ShareBackgroundImageSourceType => (
   value === 'library' || value === 'url' || value === 'upload'
 );
+
+const getCompatShareSettings = (
+  galleryImages: StudioSettings['galleryImages'],
+): Partial<StudioSettings> => {
+  const marker = (galleryImages ?? []).find((img) => img?.alt === SHARE_SETTINGS_MARKER_ALT);
+  const src = marker?.src?.trim() ?? '';
+
+  if (!src.startsWith(SHARE_SETTINGS_MARKER_SRC_PREFIX)) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(decodeURIComponent(src.slice(SHARE_SETTINGS_MARKER_SRC_PREFIX.length))) as Partial<StudioSettings>;
+  } catch {
+    return {};
+  }
+};
+
+const buildShareSettingsMarker = (source: StudioSettings): GalleryImage => {
+  const normalized = normalizeStudioSettings(source);
+  const payload: Partial<StudioSettings> = {
+    availabilityStartTime: normalized.availabilityStartTime,
+    availabilityEndTime: normalized.availabilityEndTime,
+    shareBackgroundOverlayOpacity: normalized.shareBackgroundOverlayOpacity,
+  };
+
+  if (normalized.shareBackgroundImageUrl) {
+    payload.shareBackgroundImageUrl = normalized.shareBackgroundImageUrl;
+  }
+
+  if (normalized.shareBackgroundImageSourceType) {
+    payload.shareBackgroundImageSourceType = normalized.shareBackgroundImageSourceType;
+  }
+
+  if (normalized.shareBackgroundImageStoragePath) {
+    payload.shareBackgroundImageStoragePath = normalized.shareBackgroundImageStoragePath;
+  }
+
+  return {
+    src: `${SHARE_SETTINGS_MARKER_SRC_PREFIX}${encodeURIComponent(JSON.stringify(payload))}`,
+    alt: SHARE_SETTINGS_MARKER_ALT,
+  };
+};
 
 export const formatShareTimeLabel = (time: string) => {
   const [hours, minutes] = time.split(':');
@@ -71,30 +117,37 @@ export const normalizeShareBackgroundOverlayOpacity = (value: unknown) => {
 export const normalizeStudioSettings = (
   source?: Partial<StudioSettings> | null,
 ): StudioSettings => {
+  const compatShareSettings = getCompatShareSettings(source?.galleryImages);
   const depositAmount = Number.isFinite(source?.depositAmount) && Number(source?.depositAmount) >= 0
     ? Number(source?.depositAmount)
     : 0;
 
-  const availabilityStartTime = isValidTimeValue(source?.availabilityStartTime)
-    ? source.availabilityStartTime
+  const availabilityStartTimeSource = source?.availabilityStartTime ?? compatShareSettings.availabilityStartTime;
+  const availabilityEndTimeSource = source?.availabilityEndTime ?? compatShareSettings.availabilityEndTime;
+  const availabilityStartTime = isValidTimeValue(availabilityStartTimeSource)
+    ? availabilityStartTimeSource
     : BUSINESS_START_TIME;
-  const availabilityEndTime = isValidTimeValue(source?.availabilityEndTime)
-    ? source.availabilityEndTime
+  const availabilityEndTime = isValidTimeValue(availabilityEndTimeSource)
+    ? availabilityEndTimeSource
     : BUSINESS_END_TIME;
   const availabilityWindowIsValid = !getAvailabilityWindowValidationMessage(
     availabilityStartTime,
     availabilityEndTime,
   );
 
-  const shareBackgroundImageUrl = typeof source?.shareBackgroundImageUrl === 'string'
-    ? source.shareBackgroundImageUrl.trim()
+  const shareBackgroundImageUrlSource = source?.shareBackgroundImageUrl ?? compatShareSettings.shareBackgroundImageUrl;
+  const shareBackgroundImageSourceTypeSource = source?.shareBackgroundImageSourceType ?? compatShareSettings.shareBackgroundImageSourceType;
+  const shareBackgroundImageStoragePathSource = source?.shareBackgroundImageStoragePath ?? compatShareSettings.shareBackgroundImageStoragePath;
+  const shareBackgroundOverlayOpacitySource = source?.shareBackgroundOverlayOpacity ?? compatShareSettings.shareBackgroundOverlayOpacity;
+  const shareBackgroundImageUrl = typeof shareBackgroundImageUrlSource === 'string'
+    ? shareBackgroundImageUrlSource.trim()
     : '';
-  const shareBackgroundImageSourceType = isShareBackgroundSourceType(source?.shareBackgroundImageSourceType)
+  const shareBackgroundImageSourceType = isShareBackgroundSourceType(shareBackgroundImageSourceTypeSource)
     && shareBackgroundImageUrl
-    ? source.shareBackgroundImageSourceType
+    ? shareBackgroundImageSourceTypeSource
     : undefined;
-  const shareBackgroundImageStoragePath = typeof source?.shareBackgroundImageStoragePath === 'string'
-    ? source.shareBackgroundImageStoragePath.trim()
+  const shareBackgroundImageStoragePath = typeof shareBackgroundImageStoragePathSource === 'string'
+    ? shareBackgroundImageStoragePathSource.trim()
     : '';
 
   return {
@@ -107,7 +160,7 @@ export const normalizeStudioSettings = (
     shareBackgroundImageSourceType,
     shareBackgroundImageStoragePath,
     shareBackgroundOverlayOpacity: normalizeShareBackgroundOverlayOpacity(
-      source?.shareBackgroundOverlayOpacity,
+      shareBackgroundOverlayOpacitySource,
     ),
     updatedAt: typeof source?.updatedAt === 'string'
       ? source.updatedAt
@@ -151,6 +204,21 @@ export const buildSettingsPayload = (source: StudioSettings): StudioSettings => 
   }
 
   return payload;
+};
+
+export const buildShareSettingsCompatPayload = (
+  source: StudioSettings,
+): Pick<StudioSettings, 'depositAmount' | 'galleryImages' | 'shareSlotTimes' | 'updatedAt'> => {
+  const normalized = normalizeStudioSettings(source);
+  const galleryImages = sanitizeGalleryImages(normalized.galleryImages)
+    .slice(0, 19);
+
+  return {
+    depositAmount: normalized.depositAmount,
+    galleryImages: [...galleryImages, buildShareSettingsMarker(normalized)],
+    shareSlotTimes: normalized.shareSlotTimes,
+    updatedAt: new Date().toISOString(),
+  };
 };
 
 export const getShareSettingsValidationMessage = (

@@ -44,7 +44,7 @@ import {
 } from '../lib/adminAuth';
 import {
   DEFAULT_GALLERY_IMAGES,
-  buildSettingsPayload,
+  buildShareSettingsCompatPayload,
   getShareSettingsValidationMessage,
   normalizeShareBackgroundOverlayOpacity,
   normalizeStudioSettings,
@@ -907,7 +907,7 @@ export default function Admin() {
     }
 
     const nextSettings = saveContext === 'share'
-      ? buildSettingsPayload(normalizedSource)
+      ? buildShareSettingsCompatPayload(normalizedSource)
       : buildConfigSettingsPayload(normalizedSource);
 
     try {
@@ -918,7 +918,7 @@ export default function Admin() {
         setSavingSettings(true);
         clearSettingsFeedback();
       }
-      await setDoc(doc(db, 'settings', 'global'), nextSettings, { merge: saveContext === 'config' });
+      await setDoc(doc(db, 'settings', 'global'), nextSettings, { merge: true });
       setSettings((previous) => normalizeStudioSettings({ ...previous, ...nextSettings }));
       if (successMessage) {
         if (saveContext === 'share') {
@@ -1093,7 +1093,7 @@ export default function Admin() {
 
     try {
       const baseName = file.name.replace(/\.[^.]+$/, '') || 'fondo-compartir';
-      const storagePath = `share-background/${Date.now()}-${makeSafePathSegment(baseName)}.${getFileExtension(file)}`;
+      const storagePath = `gallery/${Date.now()}-${makeSafePathSegment(baseName)}.${getFileExtension(file)}`;
       const storageRef = ref(storage, storagePath);
       await uploadBytes(storageRef, file, { contentType: file.type });
       const downloadUrl = await getDownloadURL(storageRef);
