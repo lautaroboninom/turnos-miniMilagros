@@ -49,6 +49,7 @@ import {
   normalizeShareBackgroundOverlayOpacity,
   normalizeStudioSettings,
 } from '../lib/studioSettings';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { addDays, addMinutes, format, isValid, parse } from 'date-fns';
 
 const DEFAULT_EMPLOYEE: Employee = {
@@ -293,7 +294,7 @@ const getAuthErrorMessage = (error: any) => {
 
   if (errorCode === 'auth/unauthorized-domain') {
     const currentDomain = typeof window !== 'undefined' ? window.location.hostname : 'este dominio';
-    return `Google no esta autorizado para ${currentDomain}. Agrega ese dominio en Firebase Authentication > Authorized domains.`;
+    return `Google no esta autorizado para ${currentDomain}. En Firebase project ${firebaseConfig.projectId}, agrega exactamente ${currentDomain} en Authentication > Settings > Authorized domains.`;
   }
 
   if (errorCode === 'auth/invalid-api-key') {
