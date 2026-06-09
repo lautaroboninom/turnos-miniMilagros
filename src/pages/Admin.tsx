@@ -229,7 +229,7 @@ const makeSafePathSegment = (value: string) => (
 
 const getSettingsSaveErrorMessage = (error: any) => {
   if (error?.code === 'permission-denied') {
-    return 'No tenes permisos para guardar la configuracion. Revisa las reglas de Firestore.';
+    return 'No tenes permisos para guardar. Si estas editando Compartir, falta desplegar las reglas nuevas de Firestore.';
   }
 
   if (error?.code === 'unavailable') {
@@ -237,6 +237,17 @@ const getSettingsSaveErrorMessage = (error: any) => {
   }
 
   return 'No se pudo guardar la configuracion. Revisa la conexion e intenta de nuevo.';
+};
+
+const buildConfigSettingsPayload = (source: StudioSettings): Pick<StudioSettings, 'depositAmount' | 'galleryImages' | 'shareSlotTimes' | 'updatedAt'> => {
+  const normalized = normalizeStudioSettings(source);
+
+  return {
+    depositAmount: normalized.depositAmount,
+    galleryImages: normalized.galleryImages,
+    shareSlotTimes: normalized.shareSlotTimes,
+    updatedAt: new Date().toISOString(),
+  };
 };
 
 const getAuthErrorCode = (error: any) => {
@@ -895,7 +906,9 @@ export default function Admin() {
       return false;
     }
 
-    const nextSettings = buildSettingsPayload(normalizedSource);
+    const nextSettings = saveContext === 'share'
+      ? buildSettingsPayload(normalizedSource)
+      : buildConfigSettingsPayload(normalizedSource);
 
     try {
       if (saveContext === 'share') {
@@ -905,8 +918,8 @@ export default function Admin() {
         setSavingSettings(true);
         clearSettingsFeedback();
       }
-      await setDoc(doc(db, 'settings', 'global'), nextSettings);
-      setSettings(normalizeStudioSettings(nextSettings));
+      await setDoc(doc(db, 'settings', 'global'), nextSettings, { merge: saveContext === 'config' });
+      setSettings((previous) => normalizeStudioSettings({ ...previous, ...nextSettings }));
       if (successMessage) {
         if (saveContext === 'share') {
           setShareSettingsSaveNotice(successMessage);
