@@ -251,6 +251,9 @@ const getAuthErrorCode = (error: any) => {
 const getAuthErrorMessage = (error: any) => {
   const errorCode = getAuthErrorCode(error);
   const errorMessage = typeof error?.message === 'string' ? error.message.toUpperCase() : '';
+  const readableErrorMessage = typeof error?.message === 'string'
+    ? error.message.replace(/^Firebase:\s*/i, '').replace(/\.$/, '')
+    : '';
 
   if (errorMessage.includes('CONFIGURATION_NOT_FOUND')) {
     return "Google Sign-In no esta configurado en Firebase Authentication. Habilita el proveedor Google.";
@@ -315,6 +318,10 @@ const getAuthErrorMessage = (error: any) => {
 
   if (errorCode === 'auth/operation-not-supported-in-this-environment') {
     return 'Este navegador no permite abrir Google Sign-In con ventana emergente. Se intento usar redireccion en su lugar.';
+  }
+
+  if (readableErrorMessage) {
+    return `No se pudo ingresar: ${readableErrorMessage}`;
   }
 
   return 'No se pudo ingresar. Revisa la conexion e intenta nuevamente.';

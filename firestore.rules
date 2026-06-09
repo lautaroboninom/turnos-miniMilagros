@@ -50,6 +50,12 @@ service cloud.firestore {
     //   - depositAmount: number (required)
     //   - galleryImages: list (required) [{src, alt}]
     //   - shareSlotTimes: list (optional) ['08:00', '10:00', ...]
+    //   - availabilityStartTime: string (optional) HH:mm
+    //   - availabilityEndTime: string (optional) HH:mm
+    //   - shareBackgroundImageUrl: string (optional)
+    //   - shareBackgroundImageSourceType: string (optional) ['library', 'url', 'upload']
+    //   - shareBackgroundImageStoragePath: string (optional)
+    //   - shareBackgroundOverlayOpacity: number (optional)
     //   - updatedAt: string (required)
     // ===============================================================
     
@@ -119,8 +125,23 @@ service cloud.firestore {
         data.updatedAt is string;
     }
 
+    function isValidTimeValue(value) {
+      return value is string && value.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$');
+    }
+
     function isValidSettings(data) {
-      return data.keys().hasOnly(['depositAmount', 'galleryImages', 'shareSlotTimes', 'updatedAt']) &&
+      return data.keys().hasOnly([
+          'depositAmount',
+          'galleryImages',
+          'shareSlotTimes',
+          'availabilityStartTime',
+          'availabilityEndTime',
+          'shareBackgroundImageUrl',
+          'shareBackgroundImageSourceType',
+          'shareBackgroundImageStoragePath',
+          'shareBackgroundOverlayOpacity',
+          'updatedAt'
+        ]) &&
         data.depositAmount is number && data.depositAmount >= 0 &&
         data.updatedAt is string &&
         data.galleryImages is list &&
@@ -130,6 +151,24 @@ service cloud.firestore {
           data.shareSlotTimes is list &&
           data.shareSlotTimes.size() > 0 &&
           data.shareSlotTimes.size() <= 8
+        )) &&
+        (!data.keys().hasAny(['availabilityStartTime']) || isValidTimeValue(data.availabilityStartTime)) &&
+        (!data.keys().hasAny(['availabilityEndTime']) || isValidTimeValue(data.availabilityEndTime)) &&
+        (!data.keys().hasAny(['shareBackgroundImageUrl']) || (
+          data.shareBackgroundImageUrl is string &&
+          data.shareBackgroundImageUrl.size() <= 2000
+        )) &&
+        (!data.keys().hasAny(['shareBackgroundImageSourceType']) || (
+          data.shareBackgroundImageSourceType in ['library', 'url', 'upload']
+        )) &&
+        (!data.keys().hasAny(['shareBackgroundImageStoragePath']) || (
+          data.shareBackgroundImageStoragePath is string &&
+          data.shareBackgroundImageStoragePath.size() <= 300
+        )) &&
+        (!data.keys().hasAny(['shareBackgroundOverlayOpacity']) || (
+          data.shareBackgroundOverlayOpacity is number &&
+          data.shareBackgroundOverlayOpacity >= 0 &&
+          data.shareBackgroundOverlayOpacity <= 70
         ));
     }
     
