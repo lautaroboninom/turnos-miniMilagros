@@ -27,6 +27,11 @@ export const MAX_SHARE_BACKGROUND_OVERLAY_OPACITY = 70;
 const SHARE_SETTINGS_MARKER_ALT = '__mini_milagros_share_settings_v1__';
 const SHARE_SETTINGS_MARKER_SRC_PREFIX = 'data:application/json,';
 
+type CompatShareSettingsResult = {
+  hasMarker: boolean;
+  settings: Partial<StudioSettings>;
+};
+
 const sanitizeGalleryImages = (galleryImages: StudioSettings['galleryImages']) => {
   const normalizedGallery = (galleryImages ?? [])
     .map((img) => ({ src: (img?.src ?? '').trim(), alt: (img?.alt ?? '').trim() || 'Trabajo' }))
@@ -43,18 +48,21 @@ const isShareBackgroundSourceType = (
 
 const getCompatShareSettings = (
   galleryImages: StudioSettings['galleryImages'],
-): Partial<StudioSettings> => {
+): CompatShareSettingsResult => {
   const marker = (galleryImages ?? []).find((img) => img?.alt === SHARE_SETTINGS_MARKER_ALT);
   const src = marker?.src?.trim() ?? '';
 
   if (!src.startsWith(SHARE_SETTINGS_MARKER_SRC_PREFIX)) {
-    return {};
+    return { hasMarker: false, settings: {} };
   }
 
   try {
-    return JSON.parse(decodeURIComponent(src.slice(SHARE_SETTINGS_MARKER_SRC_PREFIX.length))) as Partial<StudioSettings>;
+    return {
+      hasMarker: true,
+      settings: JSON.parse(decodeURIComponent(src.slice(SHARE_SETTINGS_MARKER_SRC_PREFIX.length))) as Partial<StudioSettings>,
+    };
   } catch {
-    return {};
+    return { hasMarker: false, settings: {} };
   }
 };
 
@@ -117,13 +125,19 @@ export const normalizeShareBackgroundOverlayOpacity = (value: unknown) => {
 export const normalizeStudioSettings = (
   source?: Partial<StudioSettings> | null,
 ): StudioSettings => {
-  const compatShareSettings = getCompatShareSettings(source?.galleryImages);
+  const compatShareSettingsResult = getCompatShareSettings(source?.galleryImages);
+  const compatShareSettings = compatShareSettingsResult.settings;
+  const hasCompatShareSettings = compatShareSettingsResult.hasMarker;
   const depositAmount = Number.isFinite(source?.depositAmount) && Number(source?.depositAmount) >= 0
     ? Number(source?.depositAmount)
     : 0;
 
-  const availabilityStartTimeSource = source?.availabilityStartTime ?? compatShareSettings.availabilityStartTime;
-  const availabilityEndTimeSource = source?.availabilityEndTime ?? compatShareSettings.availabilityEndTime;
+  const availabilityStartTimeSource = hasCompatShareSettings
+    ? compatShareSettings.availabilityStartTime
+    : source?.availabilityStartTime;
+  const availabilityEndTimeSource = hasCompatShareSettings
+    ? compatShareSettings.availabilityEndTime
+    : source?.availabilityEndTime;
   const availabilityStartTime = isValidTimeValue(availabilityStartTimeSource)
     ? availabilityStartTimeSource
     : BUSINESS_START_TIME;
@@ -135,10 +149,18 @@ export const normalizeStudioSettings = (
     availabilityEndTime,
   );
 
-  const shareBackgroundImageUrlSource = source?.shareBackgroundImageUrl ?? compatShareSettings.shareBackgroundImageUrl;
-  const shareBackgroundImageSourceTypeSource = source?.shareBackgroundImageSourceType ?? compatShareSettings.shareBackgroundImageSourceType;
-  const shareBackgroundImageStoragePathSource = source?.shareBackgroundImageStoragePath ?? compatShareSettings.shareBackgroundImageStoragePath;
-  const shareBackgroundOverlayOpacitySource = source?.shareBackgroundOverlayOpacity ?? compatShareSettings.shareBackgroundOverlayOpacity;
+  const shareBackgroundImageUrlSource = hasCompatShareSettings
+    ? compatShareSettings.shareBackgroundImageUrl
+    : source?.shareBackgroundImageUrl;
+  const shareBackgroundImageSourceTypeSource = hasCompatShareSettings
+    ? compatShareSettings.shareBackgroundImageSourceType
+    : source?.shareBackgroundImageSourceType;
+  const shareBackgroundImageStoragePathSource = hasCompatShareSettings
+    ? compatShareSettings.shareBackgroundImageStoragePath
+    : source?.shareBackgroundImageStoragePath;
+  const shareBackgroundOverlayOpacitySource = hasCompatShareSettings
+    ? compatShareSettings.shareBackgroundOverlayOpacity
+    : source?.shareBackgroundOverlayOpacity;
   const shareBackgroundImageUrl = typeof shareBackgroundImageUrlSource === 'string'
     ? shareBackgroundImageUrlSource.trim()
     : '';
