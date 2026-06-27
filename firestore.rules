@@ -69,7 +69,6 @@ service cloud.firestore {
     // Only the designated admin emails can access the backoffice.
     function isAdmin() {
       return isAuthenticated()
-        && request.auth.token.email_verified == true
         && (
           request.auth.token.email == 'milagrosisas34@gmail.com'
           || request.auth.token.email == 'lautaroboninom@gmail.com'
